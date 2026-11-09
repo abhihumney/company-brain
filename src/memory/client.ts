@@ -14,7 +14,12 @@ export function memoryClient(env: Env): Supermemory {
 			"SUPERMEMORY_API_KEY is not set — the brain has nowhere to read or write memory.",
 		)
 	}
-	const client = new Supermemory({ apiKey: env.SUPERMEMORY_API_KEY })
+	// Optional override so a self-hosted server can stand in for the hosted API.
+	const baseURL = env.SUPERMEMORY_BASE_URL?.trim()
+	const client = new Supermemory({
+		apiKey: env.SUPERMEMORY_API_KEY,
+		...(baseURL ? { baseURL } : {}),
+	})
 	clients.set(env as unknown as object, client)
 	return client
 }

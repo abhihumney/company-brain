@@ -4,3 +4,4 @@ dist/
 .wrangler/
 .DS_Store
 dist-brain/
+infra/supermemory/.env

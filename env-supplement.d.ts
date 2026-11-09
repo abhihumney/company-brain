@@ -1,6 +1,8 @@
 /** Secrets, declared here because wrangler only generates types for bindings. */
 interface Env {
 	SUPERMEMORY_API_KEY: string
+	/** Point the memory client at a self-hosted API instead of api.supermemory.ai. */
+	SUPERMEMORY_BASE_URL?: string
 	/** Any one provider's key; its prefix decides which provider it is. */
 	MODEL_API_KEY?: string
 	ANTHROPIC_API_KEY?: string

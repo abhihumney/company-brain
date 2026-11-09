@@ -1,0 +1,23 @@
+# Published as `compose.yaml` on every server release; runs the prebuilt image.
+# Fixed project name so the data volume is the same whichever directory this runs from.
+name: supermemory
+
+services:
+  supermemory:
+    image: docker.io/supermemory/supermemory:${SUPERMEMORY_VERSION:-latest}
+    init: true
+    stop_grace_period: 40s
+    environment:
+      - OPENAI_API_KEY
+      - ANTHROPIC_API_KEY
+      - GEMINI_API_KEY
+      - GROQ_API_KEY
+      - FIRECRAWL_API_KEY
+      - SUPERMEMORY_DISABLE_TELEMETRY
+    ports:
+      - "127.0.0.1:6767:6767"
+    volumes:
+      - supermemory-data:/data
+
+volumes:
+  supermemory-data:
