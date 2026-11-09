@@ -86,6 +86,14 @@ const MODEL_USD_PRICES: Record<SupportedModel, ModelTokenPrices> = {
 		cacheReadPerMTok: 0.1,
 		cacheWritePerMTok: 1.25,
 	},
+	// Haiku 5.5 list price, verified 2026-11-09; re-check at
+	// https://platform.claude.com/docs/en/about-claude/pricing
+	"claude-haiku-5.5": {
+		inputPerMTok: 0.1,
+		outputPerMTok: 0.5,
+		cacheReadPerMTok: 0.01,
+		cacheWritePerMTok: 0.125,
+	},
 
 	// Google AI Studio paid — prompts ≤ 200k (higher tier if longer)
 	"gemini-3.1-pro-preview": {

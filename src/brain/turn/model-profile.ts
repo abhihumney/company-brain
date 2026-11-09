@@ -22,10 +22,13 @@ export type ModelProfile<ModelName extends BrainProfileModel = SupportedModel> =
 		maxSteps: number
 	}
 
-export const BRAIN_MODEL = "grok-4.5" as const
+// Pinned to Haiku 5.5 for this deployment: it runs on an Anthropic-only key, and
+// Haiku keeps main-turn cost down. This is the single line to revert to upstream
+// behaviour when a multi-provider key set is available.
+export const BRAIN_MODEL = "claude-haiku-5.5" as const
 export const BRAIN_FALLBACK_MODEL = "claude-sonnet-5" as const
 export const BRAIN_FALLBACK_MODEL_FOR_ANTHROPIC = "gpt-5.6" as const
-export const TRIAGE_MODEL = "claude-haiku-4.5" as const
+export const TRIAGE_MODEL = "claude-haiku-5.5" as const
 export const RESEARCH_MODEL = "grok-4.5" as const
 export const BRAIN_MAIN_EFFORT = "high" as const satisfies Effort
 export const BRAIN_TRIAGE_EFFORT = "low" as const satisfies Effort
@@ -37,12 +40,15 @@ export const BRAIN_MAIN_MODEL_CHOICES = [
 	"claude-sonnet-5",
 	"claude-opus-4.8",
 	"claude-sonnet-4.6",
+	"claude-haiku-5.5",
+	"claude-haiku-4.5",
 	"grok-4.5",
 	"gpt-5.6",
 	"gpt-5.5",
 ] as const satisfies readonly SupportedModel[]
 
 export const BRAIN_TRIAGE_MODEL_CHOICES = [
+	"claude-haiku-5.5",
 	"claude-haiku-4.5",
 	"claude-sonnet-5",
 ] as const satisfies readonly SupportedModel[]

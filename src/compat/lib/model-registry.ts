@@ -15,6 +15,7 @@ export const SUPPORTED_MODELS = [
 	"claude-sonnet-5",
 	"claude-sonnet-4.6",
 	"claude-haiku-4.5",
+	"claude-haiku-5.5",
 	"gemini-3.1-pro-preview",
 	// Compatibility alias for chat/playground settings saved before the 3.1 upgrade.
 	"gemini-2.5-pro",
@@ -57,6 +58,10 @@ const MODEL_INFO = {
 	},
 	"claude-haiku-4.5": {
 		modelId: "claude-haiku-4-5-20251001",
+		provider: "anthropic",
+	},
+	"claude-haiku-5.5": {
+		modelId: "claude-haiku-5-5",
 		provider: "anthropic",
 	},
 	"gemini-3.1-pro-preview": {
@@ -133,6 +138,9 @@ export function getModelReasoningProviderOptions(
 			}
 		case "claude-opus-4.8":
 		case "claude-sonnet-5":
+		// Haiku 5.5 gained adaptive thinking and output_config.effort. It must stay
+		// out of the claude-haiku-4.5 branch below, which cannot accept effort.
+		case "claude-haiku-5.5":
 			return {
 				anthropic: {
 					thinking: { type: "adaptive" },
@@ -194,6 +202,7 @@ export function getModelInstantProviderOptions(
 		case "claude-sonnet-5":
 		case "claude-sonnet-4.6":
 		case "claude-haiku-4.5":
+		case "claude-haiku-5.5":
 			return {
 				anthropic: {
 					thinking: { type: "disabled" },
