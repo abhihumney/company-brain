@@ -138,13 +138,31 @@ export function getModelReasoningProviderOptions(
 			}
 		case "claude-opus-4.8":
 		case "claude-sonnet-5":
-		// Haiku 5.5 gained adaptive thinking and output_config.effort. It must stay
-		// out of the claude-haiku-4.5 branch below, which cannot accept effort.
-		case "claude-haiku-5.5":
 			return {
 				anthropic: {
 					thinking: { type: "adaptive" },
 					effort,
+				} satisfies AnthropicProviderOptions,
+			}
+		case "claude-haiku-5.5":
+			// Thinking must be explicitly DISABLED for this model, not merely left
+			// unrequested: Haiku 5.5 enables adaptive thinking by default, so returning
+			// `{}` still produced signed thinking blocks (verified on a live call).
+			// Anthropic binds each block's signature to the exact prompt prefix that
+			// produced it, and the brain replays the previous turn's assistant messages
+			// (thinking blocks included) on the next turn. The rebuilt system prefix
+			// differs, so the API rejects the replayed block ("bound to a different
+			// conversation") and turn 2 of every conversation failed. The API's escape
+			// hatch, `thinking.block_binding.prefix_mismatch_behavior: "drop_block"`,
+			// cannot reach the wire through @ai-sdk/anthropic 3.0.98: providerOptions
+			// are parsed against a schema that only keeps `type`/`display`, and the
+			// request body rebuilds `thinking` from that allow-list.
+			// Consequence: BRAIN_MAIN_EFFORT (and explicit "thinking" mode) is a no-op
+			// for this model - `effort` is not sent, since there is no thinking to
+			// budget. Same latency/cost posture as the claude-haiku-4.5 branch below.
+			return {
+				anthropic: {
+					thinking: { type: "disabled" },
 				} satisfies AnthropicProviderOptions,
 			}
 		case "claude-sonnet-4.6":
