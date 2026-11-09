@@ -6,13 +6,12 @@ import type { ProfileBucketDef } from "@repo/db/schema/common"
 // Capture policy woven into every tag's entity context: infer from behaviour,
 // decay-unless-reinforced, durable-vs-transient. Lives here, not org filterPrompt.
 export const BRAIN_CAPTURE_POLICY = [
-	"Capture durable, future-useful knowledge — decisions and the reasoning behind them, ownership and who is responsible for what, commitments and their status/blockers, status changes, resolved canonical answers to recurring questions, and constraints. Keep these permanent (no forget horizon).",
-	"Infer freely from behavior and repeated patterns — you do NOT need someone to state something explicitly. An observed pattern is a valid memory.",
-	"Because memory decays, give transient or low-confidence facts a forget horizon so they fade on their own: current status, 'today/this week', live counts, and single-observation inferences that may not recur. When the same thing shows up again, reinforce/update the existing memory instead of adding a duplicate — that renews it and firms it up.",
-	"When new information supersedes an old fact (moved from X to Y, no longer, now), update the existing memory rather than creating a parallel one.",
-	"Capture temporal context: when a fact is tied to a date, event, deadline, incident, or status change, state the date in the memory as YYYY-MM-DD so it can be ordered and staleness resolved.",
-	"Do NOT capture casual chatter and social banter, secrets/credentials, or unverified speculation.",
-	"NEVER store anything a connected tool owns as the live source of truth — PR or review status, issue/ticket state, assignees, deploy or build status, current metrics or counts, calendar or roster state, document contents. Fetch these live from the tool every time; storing them only plants data that goes stale fast and then reads as fact when it is wrong. The ONLY exception is a fact whose tool is not connected for this workspace — and even then, prefer getting it connected.",
+	"Capture durable, future-useful knowledge: decisions and reasoning, ownership/responsibility, commitments and status/blockers, status changes, canonical answers to recurring questions, constraints. Keep them permanent — no forget horizon.",
+	"Infer freely from behavior and patterns; no explicit statement needed — an observed pattern is valid memory.",
+	"Give transient or low-confidence facts a forget horizon so they fade: current status, counts, single-observation inferences. When the same recurs or a newer fact supersedes an old one (moved, no longer, now), reinforce/update the existing memory, not a duplicate or parallel one.",
+	"Capture temporal context: date any fact tied to an event, deadline, incident, or status change as YYYY-MM-DD, so it can be ordered and staleness resolved.",
+	"Do NOT capture casual or social chatter, secrets/credentials, or unverified speculation.",
+	"NEVER store anything a connected tool owns as the live source of truth — PR/review status, issue/ticket state, assignees, deploy/build status, metrics/counts, calendar/roster state, document contents. Fetch live each time; stale copies read as fact when wrong. ONLY exception: a tool not connected here; prefer connecting it.",
 ].join("\n")
 
 export const BRAIN_MEMORY_BUCKETS: ProfileBucketDef[] = [
@@ -75,7 +74,20 @@ export function buildBrainSelfEntityContext(): string {
 	].join("\n")
 }
 
-/** Shared Team Brain (`sm_org_shared`) entity context. */
+/**
+ * Shared Team Brain (`sm_org_shared`) entity context.
+ *
+ * ORDERING INVARIANT — do not "tidy" this back into a readable narrative
+ * (org intro first, policy last). supermemory rejects an `entityContext` over
+ * 1500 chars and the clamp in `src/memory/container-tags.ts` truncates by
+ * POSITION, so whatever is appended last is what gets dropped. The capture
+ * policy and the hard guardrails therefore come first, and the org/identity
+ * description comes last, because that description is the cheapest thing to
+ * lose: the profile buckets and the ingested content carry it anyway. Losing
+ * the policy instead would drop "never store what a connected tool owns",
+ * which is exactly the rule that stops the brain storing facts that go stale
+ * and then read as truth.
+ */
 export function buildBrainSharedEntityContext(params: {
 	orgName: string
 	domain?: string | null
@@ -84,13 +96,13 @@ export function buildBrainSharedEntityContext(params: {
 	const header = `Organization: ${params.orgName}${params.domain ? ` (${params.domain})` : ""}. This is the shared Company Brain for everyone in this org — the team's collective memory, fed continuously from Slack.`
 	const aboutLine = params.about?.trim() ? `About: ${params.about.trim()}` : ""
 	return [
-		header,
-		aboutLine,
+		BRAIN_CAPTURE_POLICY,
 		"Scope every memory to this organization — its people, teams, projects, customers, decisions, and product/domain terms.",
 		"When a fact is clearly and primarily about one teammate, save it with that teammate's stable person_<slack_user_id> memory tag.",
+		"Hold exactly ONE current answer per subject. When a new fact changes who owns or is responsible for something, or updates a subject's status/role/decision already in memory (a new owner, a handoff, 'now', 'no longer', 'moved to'), UPDATE that subject's existing memory (emit an updates relation) instead of storing a parallel fact — the related memories are provided for this.",
+		header,
+		aboutLine,
 		"A full profile isn't provided yet: infer the org's products, structure, and vocabulary from ingested content, and treat recurring names (people, repos, products, customers, projects) as this org's entities.",
-		"Hold exactly ONE current answer per subject. When a new fact changes who owns or is responsible for something, or updates a subject's status/role/decision already in memory (a new owner, a handoff, 'now', 'no longer', 'moved to'), UPDATE that subject's existing memory (emit an updates relation) instead of storing a parallel fact — the related memories are provided for exactly this.",
-		BRAIN_CAPTURE_POLICY,
 	]
 		.filter(Boolean)
 		.join("\n")
@@ -109,7 +121,13 @@ export function buildBrainPersonalEntityContext(params: {
 	].join("\n")
 }
 
-/** Private Slack channel tag (`slack_channel_{channelId}`) entity context. */
+/**
+ * Private Slack channel tag (`slack_channel_{channelId}`) entity context.
+ *
+ * Same ordering invariant as the shared context above: policy and guardrails
+ * first, channel description last. This context runs well past the 1500-char
+ * cap, so the trailing description is the part we accept losing.
+ */
 export function buildBrainPrivateChannelEntityContext(params: {
 	channelName?: string | null
 	purpose?: string | null
@@ -121,11 +139,11 @@ export function buildBrainPrivateChannelEntityContext(params: {
 		? `Purpose: ${params.purpose.trim()}`
 		: ""
 	return [
-		`This is ${label}.`,
-		purposeLine,
+		BRAIN_CAPTURE_POLICY,
 		"Capture company-relevant knowledge scoped to this channel's members and topics. When a fact is clearly about one teammate, save it with that teammate's stable person_<slack_user_id> memory tag.",
 		"Do NOT leak this into the shared brain.",
-		BRAIN_CAPTURE_POLICY,
+		`This is ${label}.`,
+		purposeLine,
 	]
 		.filter(Boolean)
 		.join("\n")
