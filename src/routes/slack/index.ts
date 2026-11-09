@@ -91,13 +91,13 @@ const OAUTH_STATE_TTL_SECONDS = 600
 const EVENT_DEDUP_TTL_SECONDS = 60 * 60 * 24
 
 const NOT_CONNECTED_TEXT =
-	"Supermemory isn't connected to this Slack workspace yet. Sign up for Company Brain to set it up."
+	"Supermemory isn't connected to this Slack workspace yet. Sign up for Rulebook-F to set it up."
 const NOT_CONNECTED_BLOCKS = [
 	{
 		type: "section",
 		text: {
 			type: "mrkdwn",
-			text: "Supermemory isn't connected to this Slack workspace yet. Sign up for Company Brain to set it up.",
+			text: "Supermemory isn't connected to this Slack workspace yet. Sign up for Rulebook-F to set it up.",
 		},
 	},
 	{
@@ -107,7 +107,7 @@ const NOT_CONNECTED_BLOCKS = [
 				type: "button",
 				text: {
 					type: "plain_text",
-					text: "Sign up for Company Brain",
+					text: "Sign up for Rulebook-F",
 					emoji: true,
 				},
 				url: "https://app.supermemory.ai",
@@ -947,7 +947,7 @@ export const slackRoutes = new Hono<AppContext>()
 						const ws = await getWorkspaceByTeamId(c.env, memberConnect.teamId)
 						if (!ws) {
 							await updateSlackInteractionResponse(memberConnect.responseUrl, {
-								text: "This Slack workspace is no longer connected to Company Brain.",
+								text: "This Slack workspace is no longer connected to Rulebook-F.",
 								responseType: "ephemeral",
 							})
 							return
@@ -959,7 +959,7 @@ export const slackRoutes = new Hono<AppContext>()
 						})
 						if (!actor.actor) {
 							await updateSlackInteractionResponse(memberConnect.responseUrl, {
-								text: "I couldn't verify your Company Brain membership. Ask a workspace admin to restore your access.",
+								text: "I couldn't verify your Rulebook-F membership. Ask a workspace admin to restore your access.",
 								responseType: "ephemeral",
 							})
 							return

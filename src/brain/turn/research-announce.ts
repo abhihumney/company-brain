@@ -95,7 +95,7 @@ export async function announceResearchDone(
 		const result = await generateText({
 			model: fastModel(),
 			prompt:
-				`You are Company Brain, posting in the #company-brain Slack channel right after finishing your first research pass on ${state.domain ?? "the company"}. Use only facts from the research below, never invent.\n\n` +
+				`You are Rulebook-F, posting in the #rulebook-f Slack channel right after finishing your first research pass on ${state.domain ?? "the company"}. Use only facts from the research below, never invent.\n\n` +
 				`Research:\n${brief}\n\n` +
 				"Write the digest described by the schema: two sharp facts (one should name who they compete with, if the research says), then two starter questions teammates can ask you.",
 			output: Output.object({ schema: DigestSchema }),

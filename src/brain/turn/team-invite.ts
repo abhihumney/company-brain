@@ -1253,7 +1253,7 @@ export async function startTeamInviteWave(
 			).actor
 		: null
 	if (!profile.ok || !actor?.isAdmin) {
-		await abort("Only a Company Brain organization admin can invite the team.")
+		await abort("Only a Rulebook-F organization admin can invite the team.")
 		return
 	}
 

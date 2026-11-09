@@ -27,7 +27,7 @@ export type InstallGreetingParts = {
 export function installGreeting(parts: InstallGreetingParts = {}): string {
 	const { firstName, companyName, homeChannelId, starters, trialActive } = parts
 	const hi = firstName ? `Hey ${firstName},` : "Hey,"
-	const home = homeChannelId ? `<#${homeChannelId}>` : "#company-brain"
+	const home = homeChannelId ? `<#${homeChannelId}>` : "#rulebook-f"
 	const subject = companyName ?? "your company"
 
 	const picks = starters?.length ? starters : DEFAULT_STARTERS
@@ -36,14 +36,14 @@ export function installGreeting(parts: InstallGreetingParts = {}): string {
 	const lines = [
 		`${hi} thanks for bringing me on. 👋`,
 		"",
-		"I'm *Supermemory*, your company's brain. I keep track of what your team ships, decides, and discusses, so nobody has to dig for it.",
+		"I'm *Rulebook-F*, your company's brain. I keep track of what your team ships, decides, and discusses, so nobody has to dig for it.",
 		"",
 		"*Three ways to work with me*",
 		"",
 		"💬  *DM me here*",
 		"Ask me anything, like a teammate who's read everything.",
 		"",
-		"📣  *@Supermemory in any channel*",
+		"📣  *@Rulebook-F in any channel*",
 		"Mention me and I'll jump in with the whole thread as context.",
 		"",
 		"🔌  *Connect your tools*",
@@ -82,7 +82,7 @@ export function memberGreeting(
 ): string {
 	const hi = firstName ? `Hey ${firstName},` : "Hey,"
 	const place = org ? ` to *${org}*` : ""
-	return `${hi} welcome${place}. I'm Supermemory, I keep track of what the team's working on. Need to get up to speed? Just ask me anything.`
+	return `${hi} welcome${place}. I'm Rulebook-F, I keep track of what the team's working on. Need to get up to speed? Just ask me anything.`
 }
 
 export async function orgWithBrain(

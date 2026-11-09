@@ -6,10 +6,13 @@ import {
 	type SlackBotIdentity,
 } from "./client"
 
+// Deliberately excludes the bare word "rulebook": the owner's separate
+// Rulebook DS bot may share a workspace, and a bare "rulebook" alias would
+// make each bot answer to the other's name.
 const PRODUCT_ALIASES = [
-	"supermemory",
-	"company brain",
-	"company-brain",
+	"rulebook-f",
+	"rulebook f",
+	"rulebookf",
 ] as const
 const ALIAS_CACHE_TTL_SECONDS = 60 * 60 * 24
 const DIRECT_GREETING_PREFIX =

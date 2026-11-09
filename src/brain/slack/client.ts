@@ -2022,7 +2022,7 @@ export function buildSlackBotIdentity(
 ): SlackBotIdentity {
 	return {
 		slackUserId,
-		productName: "Company Brain",
+		productName: "Rulebook-F",
 		...profile,
 	}
 }

@@ -25,7 +25,7 @@ function clientMetadata(
 	scope?: string,
 ): OAuthClientMetadata {
 	return {
-		client_name: "Supermemory Company Brain",
+		client_name: "Rulebook-F",
 		redirect_uris: [callbackUrl],
 		grant_types: ["authorization_code", "refresh_token"],
 		response_types: ["code"],

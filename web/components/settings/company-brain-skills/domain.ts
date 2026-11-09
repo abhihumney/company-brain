@@ -53,7 +53,7 @@ export function emptySkillDraft(): SkillDraft {
 }
 
 export function skillOriginLabel(origin: SkillOrigin): string | null {
-	return origin === "slack" ? "Created by Company Brain" : null
+	return origin === "slack" ? "Created by Rulebook-F" : null
 }
 
 export function setSkillDraftScope(

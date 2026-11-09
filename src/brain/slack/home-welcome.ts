@@ -19,7 +19,7 @@ export function companyBrainHomeWelcomeMessages(args: {
 
 	return [
 		[
-			"👋 *I'm Supermemory, your Company Brain.*",
+			"👋 *I'm Rulebook-F, your company brain.*",
 			"Ask me what's going on, where something stands, or what the team decided — in here, any channel I'm in, or by DM.",
 			thanks,
 		].join("\n"),
@@ -29,9 +29,9 @@ export function companyBrainHomeWelcomeMessages(args: {
 // Customer-initiated; DMs the bot sent cannot be unsent, so the channel is the only goodbye.
 export function companyBrainDisconnectMessage(): string {
 	return [
-		"*Supermemory has been disconnected from this workspace.*",
+		"*Rulebook-F has been disconnected from this workspace.*",
 		"I won't reply here, in other channels, or in DMs anymore. This channel stays, along with everything already in it.",
-		"Reinstall from Company Brain settings if you want me back.",
+		"Reinstall from Rulebook-F settings if you want me back.",
 	].join("\n")
 }
 

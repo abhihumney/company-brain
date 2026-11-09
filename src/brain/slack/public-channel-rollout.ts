@@ -1011,7 +1011,7 @@ export async function startPublicChannelRollout(
 			botToken,
 			replyChannelId,
 			payload.slackUserId,
-			`This installation needs to be reauthorized before I can join and read public channels. Missing Slack scopes: ${missing.join(", ")}. Reinstall Company Brain from the Supermemory app, then try again.`,
+			`This installation needs to be reauthorized before I can join and read public channels. Missing Slack scopes: ${missing.join(", ")}. Reinstall Rulebook-F from the Supermemory app, then try again.`,
 		)
 		return
 	}
@@ -1031,7 +1031,7 @@ export async function startPublicChannelRollout(
 			botToken,
 			replyChannelId,
 			payload.slackUserId,
-			"Only a Company Brain organization admin can add me across the workspace.",
+			"Only a Rulebook-F organization admin can add me across the workspace.",
 		)
 		return
 	}

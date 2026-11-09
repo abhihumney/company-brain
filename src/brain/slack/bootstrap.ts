@@ -9,7 +9,7 @@ import {
 } from "./home-welcome"
 
 const SLACK_API = "https://slack.com/api"
-const HOME_CHANNEL_NAME = "company-brain"
+const HOME_CHANNEL_NAME = "rulebook-f"
 // 25k channels: enough for any real workspace, still bounded.
 const CHANNEL_PAGE_SIZE = 1000
 const MAX_CHANNEL_PAGES = 25

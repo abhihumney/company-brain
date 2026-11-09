@@ -282,7 +282,7 @@ export async function requestAccessLease(
 			ownersFound,
 			fanoutCount: 0,
 			capped: false,
-			message: `Nobody in this Company Brain organization has an active personal ${serverName} MCP connection.`,
+			message: `Nobody in this Rulebook-F organization has an active personal ${serverName} MCP connection.`,
 		}
 	}
 

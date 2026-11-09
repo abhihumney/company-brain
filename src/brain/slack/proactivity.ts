@@ -14,7 +14,7 @@ export const BRAIN_CHANNEL_PROACTIVITY = [
 ] as const satisfies readonly BrainChannelProactivity[]
 
 export const DEFAULT_BRAIN_PROACTIVITY: BrainProactivityDefault = "all_channels"
-export const HOME_CHANNEL_NAME = "company-brain"
+export const HOME_CHANNEL_NAME = "rulebook-f"
 
 export const PROACTIVITY_FILTER_REASON =
 	"Proactive replies are disabled for this channel by the org's proactivity settings."

@@ -41,8 +41,8 @@ export function memoriesToMarkdown(params: {
 		0,
 	)
 	const title = params.orgName?.trim()
-		? `# What Company Brain remembers about ${params.orgName.trim()}`
-		: "# What Company Brain remembers"
+		? `# What Rulebook-F remembers about ${params.orgName.trim()}`
+		: "# What Rulebook-F remembers"
 	const lines = [
 		title,
 		"",

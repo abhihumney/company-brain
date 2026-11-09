@@ -5,9 +5,9 @@ import { postSlackFarewell, shouldHoldForFarewell } from "./farewell"
 const post = (result: SlackPostResult) => vi.fn(async () => result)
 
 describe("postSlackFarewell", () => {
-	it("posts to #company-brain found from the bot's channels and holds on rate limit", async () => {
+	it("posts to #rulebook-f found from the bot's channels and holds on rate limit", async () => {
 		const listBotConversations = vi.fn(async () => [
-			{ id: "C-home", name: "company-brain", isPrivate: false },
+			{ id: "C-home", name: "rulebook-f", isPrivate: false },
 		])
 		const posted = post({ ok: true, ts: String(Date.now() / 1000) })
 		await expect(

@@ -56,7 +56,7 @@ export type ResearchState = {
 const SETUP_STEPS: { key: string; title: string; delayMs: number }[] = [
 	{
 		key: "workspace",
-		title: "Setting up your Company Brain workspace",
+		title: "Setting up your Rulebook-F workspace",
 		delayMs: 600,
 	},
 	{ key: "prepare", title: "Preparing deep research", delayMs: 700 },

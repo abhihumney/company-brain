@@ -322,7 +322,7 @@ export function createSandboxTools(args: CreateSandboxToolsArgs): ToolSet {
 					if (!upload.ok) {
 						const scopeHint =
 							upload.error === "missing_scope"
-								? " Reinstall Company Brain to grant files:write."
+								? " Reinstall Rulebook-F to grant files:write."
 								: ""
 						throw new SlackArtifactUploadError(
 							`Created ${filename}, but Slack could not upload it (${upload.stage}: ${upload.error}).${scopeHint}`,

@@ -73,7 +73,7 @@ export function automaticTeamInviteProgressBlocks(args: {
 			type: "section",
 			text: {
 				type: "mrkdwn",
-				text: "*Adding your workspace to Company Brain* 👥\nFull members are being provisioned, invited to #company-brain, and sent a personal introduction. Guests and external members are excluded.",
+				text: "*Adding your workspace to Rulebook-F* 👥\nFull members are being provisioned, invited to #rulebook-f, and sent a personal introduction. Guests and external members are excluded.",
 			},
 		},
 		{
@@ -171,13 +171,13 @@ export function memberIntroText(parts: MemberIntroParts): string {
 	const { firstName, companyName, homeChannelId, starters } = parts
 	const hi = firstName ? `Hey ${firstName},` : "Hey,"
 	const subject = companyName ?? "your company"
-	const home = homeChannelId ? `<#${homeChannelId}>` : "#company-brain"
+	const home = homeChannelId ? `<#${homeChannelId}>` : "#rulebook-f"
 	const picks = starters?.length ? starters : DEFAULT_MEMBER_STARTERS
 
 	const lines = [
 		`${hi} 👋`,
 		"",
-		`I'm *Supermemory*, ${subject}'s brain. I keep track of what the team ships, decides, and discusses, so nobody has to dig for it.`,
+		`I'm *Rulebook-F*, ${subject}'s brain. I keep track of what the team ships, decides, and discusses, so nobody has to dig for it.`,
 		"",
 		`🔍  *What I can see:* public channels I've been added to (like ${home}) and the tools the team connects.`,
 		"🔒  *What I can't see:* your DMs with anyone else, or private channels I'm not in.",

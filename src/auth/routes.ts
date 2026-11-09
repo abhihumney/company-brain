@@ -188,7 +188,7 @@ export const authRoutes = new Hono<AppContext>()
 		if (!claimed) return refuse("Couldn't create the organization.", 409)
 		if (claimed.teamId && claimed.teamId !== teamId) {
 			return refuse(
-				`This Company Brain belongs to another Slack workspace. Sign in with your account on that workspace.`,
+				`This Rulebook-F belongs to another Slack workspace. Sign in with your account on that workspace.`,
 			)
 		}
 

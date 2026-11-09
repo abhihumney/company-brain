@@ -44,7 +44,7 @@ function googleCredentials(env: Env): {
 	const clientId = env.GOOGLE_WORKSPACE_CLIENT_ID
 	const clientSecret = env.GOOGLE_WORKSPACE_CLIENT_SECRET
 	if (!clientId || !clientSecret) {
-		throw new Error("Company Brain Google Workspace OAuth is not configured")
+		throw new Error("Rulebook-F Google Workspace OAuth is not configured")
 	}
 	return { clientId, clientSecret }
 }

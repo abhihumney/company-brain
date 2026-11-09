@@ -26,7 +26,7 @@ import { BACKEND } from "@lib/api"
 
 type Channel = { id: string; name: string; isPrivate: boolean }
 
-const HOME_CHANNEL_NAME = "company-brain"
+const HOME_CHANNEL_NAME = "rulebook-f"
 
 const MODES: {
 	id: BrainProactivityDefault
@@ -41,7 +41,7 @@ const MODES: {
 	{
 		id: "own_channel_only",
 		label: "Only its own channel",
-		description: "Speaks only in #company-brain unless @mentioned or DMed.",
+		description: "Speaks only in #rulebook-f unless @mentioned or DMed.",
 	},
 ]
 
@@ -286,7 +286,7 @@ export default function CompanyBrainProactivity() {
 								>
 									{slackStatusQuery.data?.connected === false
 										? "Connect Slack to set per-channel exceptions."
-										: "Invite Company Brain to a Slack channel to list it here."}
+										: "Invite Rulebook-F to a Slack channel to list it here."}
 								</p>
 							)}
 						</div>
