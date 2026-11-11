@@ -37,7 +37,7 @@ export type BrainToolCallEvent = {
 
 export function getToolFinishOutput(event: unknown): unknown {
 	const e = event as Record<string, unknown>
-	return (
+	const output =
 		e.output ??
 		e.result ??
 		e.toolResult ??
@@ -45,5 +45,8 @@ export function getToolFinishOutput(event: unknown): unknown {
 		(e.toolCall && typeof e.toolCall === "object"
 			? (e.toolCall as Record<string, unknown>).output
 			: undefined)
-	)
+	if (output !== undefined) return output
+	// A thrown tool error carries its explanation in `error`, not `output`;
+	// keep that text in logs, telemetry, and the thread trajectory.
+	return e.error instanceof Error ? e.error.message : e.error
 }

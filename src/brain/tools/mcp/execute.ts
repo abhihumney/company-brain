@@ -66,6 +66,10 @@ import { executeWithResetRetry } from "./reset-retry"
 import { commandWrapperLogicalInvocation } from "./router-wrapper"
 import type { McpRuntimeServerState } from "./runtime-tools"
 import type { McpConnectionRow } from "./store"
+import {
+	connectedAppFailureError,
+	isConnectedAppFailureOutput,
+} from "./tool-failure"
 
 export const RUN_APP_CODE_TOOL_NAME = "run_app_code"
 export const DISCOVER_APP_METHODS_TOOL_NAME = "discover_app_methods"
@@ -914,6 +918,7 @@ export async function createConnectedAppRuntimeTools(args: {
 				const release = await operationQueue.acquire()
 				const callStart = args.state.nativeCalls.length
 				let targets: ConnectedAppTarget[] = []
+				let result: RunAppCodeOutput
 				try {
 					if (pendingApproval || args.state.pendingApproval) {
 						throw new ToolError({
@@ -988,7 +993,7 @@ export async function createConnectedAppRuntimeTools(args: {
 								`[company-brain][${args.traceId}] connected-app runtime reset mid-program; retrying once`,
 							),
 					})
-					return await terminalOrPaused({
+					result = await terminalOrPaused({
 						output,
 						runtime,
 						targets,
@@ -1003,17 +1008,23 @@ export async function createConnectedAppRuntimeTools(args: {
 						setPending,
 					})
 				} catch (error) {
-					return errorResult({
+					result = errorResult({
 						error: unknownFailure(error, args.traceId),
 						logs: "",
 						calls: publicCalls(args.state, callStart),
-					})
+					}) as RunAppCodeOutput
 				} finally {
 					await Promise.all(
 						targets.map((target) => target.handle.close().catch(() => {})),
 					)
 					release()
 				}
+				// A failed run must travel the framework's error channel: a
+				// {"status":"error"} result reads like a successful tool result.
+				if (isConnectedAppFailureOutput(result)) {
+					throw connectedAppFailureError(result)
+				}
+				return result
 			},
 		})
 	}

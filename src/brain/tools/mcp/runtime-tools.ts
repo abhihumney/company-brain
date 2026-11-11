@@ -1,6 +1,7 @@
 import { type ToolSet, tool } from "ai"
 import { z } from "zod"
 import type { ActiveLease, LeaseRuntimeContext } from "../../lease/types"
+import { ToolError } from "../../turn/errors"
 import { McpReauthRequiredError } from "./oauth-provider"
 import { connectToolProvider, type ToolProviderHandle } from "./provider"
 import {
@@ -8,6 +9,7 @@ import {
 	listActiveConnectionsForActor,
 	markConnectionError,
 } from "./store"
+import { failureText, isMcpErrorResult, mcpErrorContent } from "./tool-failure"
 import {
 	classifyMcpTool,
 	decideLeasedTool,
@@ -117,6 +119,30 @@ export async function createMcpRuntimeTools(
 			: error instanceof Error
 				? error.message
 				: String(error)
+	// A failed or denied execute must surface as a failed tool call, not as a
+	// successful result whose JSON happens to describe an error.
+	const toolFailure = (
+		id: string,
+		kind: "remote_error" | "policy_denied" | "unknown_method",
+		message: string,
+		detail?: string,
+	): ToolError => {
+		const suggestion =
+			kind === "remote_error"
+				? "Read the server detail, correct the call, then retry once."
+				: kind === "unknown_method"
+					? "Call mcp_search_tools for the correct tool id, then retry."
+					: "Do not retry unless the requester explicitly asks again."
+		return new ToolError({
+			kind,
+			tool: id,
+			message: failureText(message, detail, suggestion),
+			detail,
+			suggestion,
+			retryable: kind === "remote_error",
+			traceId,
+		})
+	}
 	const allConnections = actor.orgSharedOnly
 		? await listActiveConnectionsForActor(env, actor.orgId, undefined, false)
 		: await listActiveConnectionsForActor(
@@ -292,33 +318,45 @@ export async function createMcpRuntimeTools(
 			? await leaseCtx.revalidate(lease.leaseId)
 			: false
 		if (!stillValid) {
-			return {
-				isError: true,
-				error: "Your temporary access has expired or been revoked.",
-			}
+			throw toolFailure(
+				id,
+				"policy_denied",
+				"Your temporary access has expired or been revoked.",
+			)
 		}
 		const decision = decideLeasedTool(toolClass, lease.mode)
 		if (!decision.allowed) {
-			return { isError: true, error: decision.reason }
+			throw toolFailure(id, "policy_denied", decision.reason)
 		}
 		const t0 = Date.now()
+		let out: unknown
 		try {
-			const out = await t.handle.callTool(t.toolName, args ?? {}, {
+			out = await t.handle.callTool(t.toolName, args ?? {}, {
 				retryOnTimeout: toolClass === "read",
 			})
-			console.log(
-				`[company-brain][${traceId}] mcp_execute_tool(leased) ${id} ms=${Date.now() - t0} lease=${lease.leaseId}`,
-			)
-			return out
 		} catch (err) {
 			console.warn(
 				`[company-brain][${traceId}] mcp_execute_tool(leased) ${id} failed: ${loggedError(err)}`,
 			)
-			return {
-				isError: true,
-				error: err instanceof Error ? err.message : String(err),
-			}
+			throw toolFailure(
+				id,
+				"remote_error",
+				`${id} failed on the connected app.`,
+				err instanceof Error ? err.message : String(err),
+			)
 		}
+		console.log(
+			`[company-brain][${traceId}] mcp_execute_tool(leased) ${id} ms=${Date.now() - t0} lease=${lease.leaseId}`,
+		)
+		if (isMcpErrorResult(out)) {
+			throw toolFailure(
+				id,
+				"remote_error",
+				`${id} failed on the connected app.`,
+				mcpErrorContent(out),
+			)
+		}
+		return out
 	}
 
 	const searchTool = tool({
@@ -410,31 +448,46 @@ export async function createMcpRuntimeTools(
 		},
 		execute: async ({ tool: id, arguments: args }) => {
 			const t = index.get(id)
-			if (!t) return { isError: true, error: `unknown tool '${id}'` }
+			if (!t) {
+				throw toolFailure(id, "unknown_method", `Unknown MCP tool '${id}'.`)
+			}
 			if (t.lease) return runLeasedTool(t, t.lease, id, args)
-			if (isBlockedWrite(t, actor.readOnly === true))
-				return {
-					isError: true,
-					error: `org-shared connections are read-only; writing to ${t.serverSlug} needs a personal connection`,
-				}
+			if (isBlockedWrite(t, actor.readOnly === true)) {
+				throw toolFailure(
+					id,
+					"policy_denied",
+					`org-shared connections are read-only; writing to ${t.serverSlug} needs a personal connection`,
+				)
+			}
 			const t0 = Date.now()
+			let out: unknown
 			try {
-				const out = await t.handle.callTool(t.toolName, args ?? {}, {
+				out = await t.handle.callTool(t.toolName, args ?? {}, {
 					retryOnTimeout: isReadOnlyTool(t),
 				})
-				console.log(
-					`[company-brain][${traceId}] mcp_execute_tool ${id} ms=${Date.now() - t0}`,
-				)
-				return out
 			} catch (err) {
 				console.warn(
 					`[company-brain][${traceId}] mcp_execute_tool ${id} failed: ${loggedError(err)}`,
 				)
-				return {
-					isError: true,
-					error: err instanceof Error ? err.message : String(err),
-				}
+				throw toolFailure(
+					id,
+					"remote_error",
+					`${id} failed on the connected app.`,
+					err instanceof Error ? err.message : String(err),
+				)
 			}
+			console.log(
+				`[company-brain][${traceId}] mcp_execute_tool ${id} ms=${Date.now() - t0}`,
+			)
+			if (isMcpErrorResult(out)) {
+				throw toolFailure(
+					id,
+					"remote_error",
+					`${id} failed on the connected app.`,
+					mcpErrorContent(out),
+				)
+			}
+			return out
 		},
 	})
 

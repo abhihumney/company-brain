@@ -2,6 +2,7 @@ import type { ModelMessage } from "ai"
 import type { ActiveLease } from "../../lease/types"
 import type { CompanyBrainAgent } from "../../turn/agent"
 import type { TurnApprovalRequest } from "../../turn/types"
+import { connectedAppToolResultOutput } from "./tool-failure"
 
 export const CONNECTED_APP_RUNTIME_NAME = "connected_apps"
 export const CODE_PAUSE_TTL_MS = 15 * 60 * 1000
@@ -263,7 +264,7 @@ export function replaceConnectedAppToolResult(
 			replaced = true
 			return {
 				...part,
-				output: { type: "json" as const, value: output as never },
+				output: connectedAppToolResultOutput(output),
 			}
 		})
 		return changed ? ({ ...message, content } as ModelMessage) : message
