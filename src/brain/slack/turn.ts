@@ -76,6 +76,7 @@ import {
 	formatSlackTsHuman,
 	type SlackLookupContext,
 } from "./channel-lookup"
+import { loadDmHistoryConversation } from "./dm-history"
 import {
 	canUseAnswerFallback,
 	type PassiveInvestigationClaim,
@@ -2761,6 +2762,20 @@ async function runSlackTurnInner(
 		botUserIds,
 	})
 	const conversationMessages = conversation.messages
+	const dmHistoryMessages = await loadDmHistoryConversation({
+		isDm: isDM,
+		threadTs: ev.thread_ts,
+		botToken,
+		channel,
+		currentTs: ev.ts ?? "",
+		botUserId: ws.botUserId,
+		slackBotId,
+		userNames,
+		botUserIds,
+	})
+	const turnConversationMessages = dmHistoryMessages.length
+		? [...dmHistoryMessages, ...conversationMessages]
+		: conversationMessages
 	const lazyThreadHistory =
 		conversation.omittedMessages > 0 || !threadRead.complete
 			? {
@@ -2872,7 +2887,7 @@ async function runSlackTurnInner(
 		actor,
 		question: displayQuestion,
 		threadText,
-		conversationMessages,
+		conversationMessages: turnConversationMessages,
 		threadHistory: lazyThreadHistory,
 		threadParticipants,
 		workspaceGroups,
