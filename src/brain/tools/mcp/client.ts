@@ -8,6 +8,7 @@ import { withMcpFetchTimeout } from "./fetch"
 import { McpRuntimeProvider } from "./oauth-provider"
 import type { ToolProviderHandle } from "./provider"
 import type { McpConnectionRow } from "./store"
+import { normalizeToolCallArgs } from "./tool-call-args"
 
 export type McpClientHandle = {
 	client: Client
@@ -130,7 +131,16 @@ export async function callMcpTool(
 	args: Record<string, unknown>,
 	opts?: { retryOnTimeout?: boolean },
 ) {
-	const params = { name, arguments: args }
+	// Last hop before the MCP server: every connected-app path (Code Mode, the
+	// direct MCP fallback, leased access) dispatches through here, so normalise
+	// once here rather than in each caller.
+	const normalized = normalizeToolCallArgs(args)
+	if (normalized !== args) {
+		console.warn(
+			`[company-brain] mcp tool ${name} args rewritten: dropped creation_mode="draft" to keep the supplied parent`,
+		)
+	}
+	const params = { name, arguments: normalized }
 	const options = { timeout: MCP_TOOL_TIMEOUT_MS }
 	try {
 		return await handle.client.callTool(params, undefined, options)
