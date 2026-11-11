@@ -168,14 +168,44 @@ describe("surface privacy", () => {
 		}
 	})
 
-	it("only allows storing a scope the surface could read back", () => {
+	it("only lets a DM store dm or unknown scope", () => {
+		expect(canStoreActionItemScope("dm", dm)).toBe(true)
+		expect(canStoreActionItemScope("unknown", dm)).toBe(true)
+		expect(canStoreActionItemScope("public:C1", dm)).toBe(false)
+		expect(canStoreActionItemScope("private:C2", dm)).toBe(false)
+	})
+
+	it("lets a public channel store its own scope, dm, or unknown", () => {
 		expect(canStoreActionItemScope("public:C1", publicC1)).toBe(true)
+		expect(canStoreActionItemScope("dm", publicC1)).toBe(true)
+		expect(canStoreActionItemScope("unknown", publicC1)).toBe(true)
+		expect(canStoreActionItemScope("public:C2", publicC1)).toBe(false)
 		expect(canStoreActionItemScope("private:C1", publicC1)).toBe(false)
-		expect(canStoreActionItemScope("private:C1", privateC1)).toBe(true)
-		expect(canStoreActionItemScope("private:C2", privateC1)).toBe(false)
+	})
+
+	it("lets a private channel store its own scope, dm, or unknown", () => {
+		const privateC2: ActionItemSurface = {
+			kind: "private_channel",
+			channelId: "C2",
+		}
+		expect(canStoreActionItemScope("private:C2", privateC2)).toBe(true)
+		expect(canStoreActionItemScope("dm", privateC2)).toBe(true)
+		expect(canStoreActionItemScope("unknown", privateC2)).toBe(true)
+		expect(canStoreActionItemScope("private:C3", privateC2)).toBe(false)
+		expect(canStoreActionItemScope("public:C1", privateC2)).toBe(false)
+	})
+
+	it("only lets an unknown surface store unknown or dm", () => {
 		expect(canStoreActionItemScope("unknown", unknown)).toBe(true)
-		expect(canStoreActionItemScope("dm", unknown)).toBe(false)
-		expect(canStoreActionItemScope("not-a-scope", dm)).toBe(false)
+		expect(canStoreActionItemScope("dm", unknown)).toBe(true)
+		expect(canStoreActionItemScope("public:C1", unknown)).toBe(false)
+		expect(canStoreActionItemScope("private:C1", unknown)).toBe(false)
+	})
+
+	it("rejects malformed scopes on every surface", () => {
+		for (const surface of [dm, publicC1, privateC1, unknown]) {
+			expect(canStoreActionItemScope("not-a-scope", surface)).toBe(false)
+		}
 	})
 })
 
@@ -265,6 +295,32 @@ describe("write gate", () => {
 			"extract_action_items",
 			"list_action_items",
 		])
+	})
+
+	it("rejects a widening scope override from a DM and stores nothing", async () => {
+		const tools = createActionItemTools({
+			...base,
+			// Any SQL call means the write gate let the widening scope through.
+			agent: {
+				sql: () => {
+					throw new Error("SQL should not run for a rejected scope")
+				},
+			} as unknown as CompanyBrainAgent,
+			allowWrites: true,
+		})
+		const extract = tools.extract_action_items as unknown as {
+			execute(input: unknown): Promise<{ error?: string; stored?: unknown[] }>
+		}
+		const result = await extract.execute({
+			items: [{ title: "Ship the deck" }],
+			source: "meeting",
+			scope: "public:C1",
+		})
+		expect(result.error).toContain(
+			'Cannot store action items with scope "public:C1"',
+		)
+		expect(result.error).toContain("direct message")
+		expect(result.stored).toEqual([])
 	})
 })
 

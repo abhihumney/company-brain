@@ -260,15 +260,19 @@ export function isActionItemVisibleOnSurface(
 	)
 }
 
-/** A turn may only store items at a scope it could read back on that surface. */
+/**
+ * Write rule: strictly narrowing. A turn may store at its own surface scope or
+ * at a narrower scope (dm/unknown), never at a scope that would make the item
+ * visible on a surface this turn is not in. This is deliberately different
+ * from the read rule above.
+ */
 export function canStoreActionItemScope(
 	scope: string,
 	surface: ActionItemSurface,
 ): boolean {
-	return (
-		isValidActionItemScope(scope) &&
-		isActionItemVisibleOnSurface(scope, surface)
-	)
+	if (!isValidActionItemScope(scope)) return false
+	if (scope === actionItemScopeForSurface(surface)) return true
+	return scope === "dm" || scope === "unknown"
 }
 
 export function actionItemSurfaceForSlackLookup(
@@ -663,7 +667,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 				.string()
 				.optional()
 				.describe(
-					"Optional stored scope override: dm, unknown, private:<channelId>, or public:<channelId>. Defaults to the current Slack surface. A scope you could not read back on this surface is rejected.",
+					"Optional stored scope override. It may only narrow visibility: use this turn's own surface scope, dm, or unknown. Anything broader — another public channel, any private scope outside the current private channel, or any public/private scope from a DM — is rejected with an error naming the current surface. Defaults to the current surface scope.",
 				),
 		}),
 		execute: async (input) => {

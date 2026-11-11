@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	classifySlackAttachment,
+	formatMessageAttachmentHint,
 	formatTranscriptTextPart,
+	formatUnreadableAttachmentPart,
 	isModelReadableSlackFile,
+	loadThreadAttachmentParts,
 	MAX_TRANSCRIPT_CHARS,
 	truncateTranscriptText,
 	type SlackFileRef,
@@ -159,5 +162,72 @@ describe("formatTranscriptTextPart", () => {
 		expect(formatTranscriptTextPart("", "hello")).toContain(
 			'filename="attachment"',
 		)
+	})
+})
+
+describe("unreadable transcripts", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals()
+	})
+
+	const slackFile: SlackFileRef = {
+		id: "F1",
+		name: "renamed.docx.txt",
+		mimetype: "application/octet-stream",
+		size: 9,
+		url_private: "https://files.slack.com/files-pri/T-F/renamed.docx.txt",
+	}
+
+	it("frames an unreadable attachment as a notice the model can report", () => {
+		const notice = formatUnreadableAttachmentPart("renamed.docx.txt")
+		expect(notice).toContain(
+			'<slack_attachment_unreadable filename="renamed.docx.txt">',
+		)
+		expect(notice).toContain("could not be read as UTF-8 text")
+		expect(notice).toContain("Do not guess its contents")
+		// The existing file hint still tells the model the file exists.
+		expect(formatMessageAttachmentHint([slackFile])).toContain(
+			"renamed.docx.txt",
+		)
+	})
+
+	it("degrades to an explicit unreadable notice for non-UTF-8 text", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(
+						new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0xff]),
+						{ status: 200 },
+					),
+			),
+		)
+		const parts = await loadThreadAttachmentParts("xoxb-test", [slackFile])
+		expect(parts).toHaveLength(1)
+		const part = parts[0]
+		expect(part?.type).toBe("text")
+		if (part?.type !== "text") return
+		expect(part.text).toContain("renamed.docx.txt")
+		expect(part.text).toContain("could not be read as UTF-8 text")
+		expect(part.text.trim().length).toBeGreaterThan(0)
+	})
+
+	it("still attaches valid UTF-8 text normally", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(new TextEncoder().encode("Priya: I'll send it."), {
+						status: 200,
+					}),
+			),
+		)
+		const parts = await loadThreadAttachmentParts("xoxb-test", [slackFile])
+		expect(parts).toHaveLength(1)
+		const part = parts[0]
+		expect(part?.type).toBe("text")
+		if (part?.type !== "text") return
+		expect(part.text).toContain("Priya: I'll send it.")
+		expect(part.text).not.toContain("slack_attachment_unreadable")
 	})
 })

@@ -103,6 +103,15 @@ export function formatTranscriptTextPart(
 	].join("\n")
 }
 
+/** Wrap an unreadable text attachment so the model knows it exists but not what it says. */
+export function formatUnreadableAttachmentPart(fileName: string): string {
+	return [
+		`<slack_attachment_unreadable filename="${transcriptFileName(fileName) || "attachment"}">`,
+		"This attachment could not be read as UTF-8 text, so its contents are unavailable. It may be a binary document with a text filename. Do not guess its contents; tell the user it could not be read.",
+		"</slack_attachment_unreadable>",
+	].join("\n")
+}
+
 function decodeTranscriptText(data: Uint8Array): string | null {
 	try {
 		return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(
@@ -340,9 +349,15 @@ export async function loadThreadAttachmentParts(
 		}
 		const text = decodeTranscriptText(data)
 		if (text === null) {
+			// Keep the attachment visible to the model as an explicit unreadable
+			// notice: never throw the turn away and never attach empty text.
 			console.warn(
-				`[slack] skip transcript ${file.name}: content is not valid UTF-8 text`,
+				`[slack] transcript ${file.name} is not valid UTF-8 text; attaching unreadable notice`,
 			)
+			parts.push({
+				type: "text",
+				text: formatUnreadableAttachmentPart(file.name),
+			})
 			continue
 		}
 		parts.push({
