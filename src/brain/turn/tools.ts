@@ -41,6 +41,10 @@ import { sandboxToolsConfigured } from "../tools/sandbox/client"
 import { createSandboxTools } from "../tools/sandbox/tools"
 import { createSchedulerTools } from "../tools/scheduler"
 import { createSendToTools } from "../tools/send-to"
+import {
+	actionItemSurfaceForSlackLookup,
+	createActionItemTools,
+} from "./action-items"
 import type { TurnActor } from "./actor"
 import type { CompanyBrainAgent } from "./agent"
 import { createCaptureTools, type TurnCapture } from "./capture-tools"
@@ -56,6 +60,10 @@ import {
 } from "./lazy-tools"
 import { resolveBrainTriageProfile } from "./model-profile"
 import { createProgressTools } from "./progress-tools"
+import {
+	createResolveSlackMembersTool,
+	createSlackMemberDirectoryCache,
+} from "./slack-member-resolve"
 import type { TurnState } from "./state"
 import { createFinishTurnTool, FINISH_TURN_TOOL_NAME } from "./terminal"
 import type {
@@ -251,6 +259,7 @@ export async function assembleTurnTools(
 		capture,
 	} = args
 	const passiveInvestigation = Boolean(args.options?.passiveInvestigation)
+	const allowWrites = !passiveInvestigation && !scheduledRun && !actor.readOnly
 	const requestText = args.options?.turnSteering ?? args.turnState?.request.text
 	const slackResponseSurface: SlackResponseSurface =
 		slackLookup?.memoryScope?.kind === "dm"
@@ -258,6 +267,10 @@ export async function assembleTurnTools(
 			: slackLookup?.memoryScope?.kind === "private_channel"
 				? "private_channel"
 				: "public_channel"
+	const actionItemSurface = actionItemSurfaceForSlackLookup(slackLookup)
+	const slackMemberDirectory = createSlackMemberDirectoryCache(
+		slackLookup?.botToken,
+	)
 	const assembleStartedAt = Date.now()
 	console.log(
 		`[company-brain][${traceId}] assembleTurnTools start actorUser=${actor.userId ?? "-"} personalOnly=${actor.personalConnectionsOnly ? "yes" : "no"} scheduled=${scheduledRun ? "yes" : "no"} slackLookup=${slackLookup ? "yes" : "no"} memoryScope=${slackLookup?.memoryScope?.kind ?? "none"}`,
@@ -398,9 +411,25 @@ export async function assembleTurnTools(
 			askerSlackUserId: args.askerSlackUserId,
 			traceId,
 			// Config writes need a human asking for them, like every other write.
-			allowWrites: !passiveInvestigation && !scheduledRun && !actor.readOnly,
+			allowWrites,
 		}),
 	}
+	Object.assign(
+		tools,
+		createResolveSlackMembersTool({
+			deps,
+			directory: slackMemberDirectory,
+			traceId,
+		}),
+		createActionItemTools({
+			deps,
+			agent,
+			surface: actionItemSurface,
+			directory: slackMemberDirectory,
+			traceId,
+			allowWrites,
+		}),
+	)
 	Object.assign(
 		tools,
 		createSkillTools(
