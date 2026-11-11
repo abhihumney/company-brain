@@ -122,18 +122,6 @@ export function normalizeActionItemOwnerName(value: string | null | undefined): 
 		.toLowerCase()
 }
 
-function normalizeSourceRefFamily(
-	value: string | null | undefined,
-	source: ActionItemSource,
-): string {
-	const normalized = (value ?? "")
-		.normalize("NFKC")
-		.replace(/\s+/g, " ")
-		.trim()
-		.toLowerCase()
-	return `${source}:${normalized ? `ref:${normalized}` : "ref:none"}`
-}
-
 function ownerDedupeKeyPart(
 	ownerId: string | null | undefined,
 	ownerName: string | null | undefined,
@@ -145,21 +133,24 @@ function ownerDedupeKeyPart(
 }
 
 /**
- * Stable pre-hash payload. The dedupe key is a hash of normalised title,
- * resolved owner id (or raw owner name), and the source_ref family, so
- * re-extracting the same transcript does not duplicate rows.
+ * Stable pre-hash payload for the action-item dedupe key: stored scope,
+ * normalised title, and resolved owner id (or raw owner name).
+ *
+ * source_ref is deliberately excluded. It is model-authored provenance and
+ * previously let the same transcript hash differently between runs. The
+ * trade-off is deliberate: an identical title+owner in the same scope is
+ * treated as the same commitment even when it came from a different source.
  */
 export function actionItemDedupePayload(input: {
+	scope: string
 	title: string
 	ownerId?: string | null
 	ownerName?: string | null
-	sourceRef?: string | null
-	source: ActionItemSource
 }): string {
 	return [
+		input.scope,
 		normalizeActionItemTitle(input.title),
 		ownerDedupeKeyPart(input.ownerId, input.ownerName),
-		normalizeSourceRefFamily(input.sourceRef, input.source),
 	].join("\u0000")
 }
 
@@ -174,11 +165,10 @@ async function sha256Hex(value: string): Promise<string> {
 }
 
 export async function buildActionItemDedupeKey(input: {
+	scope: string
 	title: string
 	ownerId?: string | null
 	ownerName?: string | null
-	sourceRef?: string | null
-	source: ActionItemSource
 }): Promise<string> {
 	return sha256Hex(actionItemDedupePayload(input))
 }
@@ -754,6 +744,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 				title: string
 				owner: string | null
 				ownerName: string | null
+				mention: string | null
 				status: ActionItemStatus
 			}> = []
 			const unresolvedOwners: UnresolvedOwner[] = []
@@ -804,11 +795,10 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 				}
 
 				const dedupeKey = await buildActionItemDedupeKey({
+					scope,
 					title: item.title,
 					ownerId,
 					ownerName,
-					sourceRef: input.source_ref,
-					source: input.source,
 				})
 				if (seenKeys.has(dedupeKey)) {
 					duplicates += 1
@@ -838,6 +828,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 					title: item.title,
 					owner: ownerId,
 					ownerName,
+					mention: ownerId ? `<@${ownerId}>` : null,
 					status: "open",
 				})
 			}

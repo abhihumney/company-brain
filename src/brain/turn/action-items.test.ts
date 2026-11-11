@@ -23,6 +23,70 @@ import {
 	type ActionItemSurface,
 } from "./action-items"
 import type { TurnDeps } from "./deps"
+import type { SlackMember } from "../slack/client"
+
+type FakeRow = Record<string, unknown>
+
+function createFakeActionItemAgent(): {
+	agent: CompanyBrainAgent
+	rows: FakeRow[]
+} {
+	const rows: FakeRow[] = []
+	const sql = (
+		strings: TemplateStringsArray,
+		...values: unknown[]
+	): unknown[] => {
+		const text = strings.join("?")
+		if (/CREATE TABLE|CREATE INDEX/i.test(text)) return []
+		if (/SELECT id FROM brain_action_item WHERE dedupe_key/i.test(text)) {
+			return rows
+				.filter((row) => row.dedupe_key === values[0])
+				.map((row) => ({ id: row.id }))
+		}
+		if (/INSERT INTO brain_action_item/i.test(text)) {
+			const [
+				id,
+				title,
+				detail,
+				owner,
+				owner_name,
+				owner_resolution,
+				status,
+				source,
+				source_ref,
+				scope,
+				due,
+				evidence,
+				dedupe_key,
+				created_at,
+				updated_at,
+			] = values
+			if (!rows.some((row) => row.dedupe_key === dedupe_key)) {
+				rows.push({
+					id,
+					title,
+					detail,
+					owner,
+					owner_name,
+					owner_resolution,
+					status,
+					source,
+					source_ref,
+					scope,
+					due,
+					evidence,
+					dedupe_key,
+					created_at,
+					updated_at,
+				})
+			}
+			return []
+		}
+		if (/SELECT \* FROM brain_action_item/i.test(text)) return [...rows]
+		throw new Error(`Unhandled fake SQL: ${text}`)
+	}
+	return { agent: { sql } as unknown as CompanyBrainAgent, rows }
+}
 
 describe("normalizeActionItemTitle", () => {
 	it("folds case, whitespace, non-breaking spaces, and trailing punctuation", () => {
@@ -43,53 +107,42 @@ describe("normalizeActionItemTitle", () => {
 })
 
 describe("dedupe", () => {
-	it("hashes the same normalised item to the same key", async () => {
+	it("hashes the same normalised title and owner to the same key", async () => {
 		const first = buildActionItemDedupeKey({
+			scope: "dm",
 			title: "Send the deck",
 			ownerId: "U1",
-			source: "meeting",
-			sourceRef: "transcript-abc",
 		})
 		const second = buildActionItemDedupeKey({
+			scope: "dm",
 			title: "  send  THE deck. ",
 			ownerId: "U1",
-			source: "meeting",
-			sourceRef: "  transcript-abc ",
 		})
 		expect(await first).toBe(await second)
 	})
 
-	it("changes when the owner changes", () => {
+	it("changes the key when the owner changes", () => {
 		const payload = (ownerId: string | null, ownerName: string | null) =>
 			actionItemDedupePayload({
+				scope: "dm",
 				title: "Send the deck",
 				ownerId,
 				ownerName,
-				source: "meeting",
-				sourceRef: "transcript-abc",
 			})
 		expect(payload("U1", null)).not.toBe(payload("U2", null))
 		expect(payload(null, "Priya Shah")).not.toBe(payload(null, "Sam Rivera"))
 		expect(payload("U1", "Priya")).toBe(payload("u1", "Someone Else"))
 	})
 
-	it("changes when the source_ref family changes and falls back to source", () => {
-		const payload = (
-			sourceRef: string | null,
-			source: "meeting" | "message" = "meeting",
-		) =>
+	it("changes the key when the stored scope changes", () => {
+		const payload = (scope: string) =>
 			actionItemDedupePayload({
+				scope,
 				title: "Send the deck",
 				ownerId: "U1",
-				source,
-				sourceRef,
 			})
-		expect(payload("transcript-a")).not.toBe(payload("transcript-b"))
-		expect(payload("  TRANSCRIPT-A  ")).toBe(payload("transcript-a"))
-		expect(payload(null)).toBe(payload(""))
-		expect(payload("transcript-a", "message")).not.toBe(
-			payload("transcript-a", "meeting"),
-		)
+		expect(payload("dm")).not.toBe(payload("public:C1"))
+		expect(payload("public:C1")).not.toBe(payload("private:C1"))
 	})
 })
 
@@ -353,5 +406,61 @@ describe("insertActionItem write validation", () => {
 		expect(() =>
 			insertActionItem(agent, { ...base, due: "tomorrow" }),
 		).toThrow(/due/)
+	})
+})
+
+describe("extract dedupe across source_ref variants", () => {
+	it("stores four items once, then skips all four when source_ref is worded differently", async () => {
+		const { agent, rows } = createFakeActionItemAgent()
+		const members: SlackMember[] = [
+			{ id: "U1", name: "Priya Shah", handle: "priya" },
+			{ id: "U2", name: "Sam Rivera", handle: "sam.r" },
+			{ id: "U3", name: "Sam Chen", handle: "sam.c" },
+		]
+		const tools = createActionItemTools({
+			deps: { z, tool } as unknown as TurnDeps,
+			agent,
+			surface: { kind: "dm" },
+			directory: {
+				load: async () => ({ ok: true as const, members }),
+			},
+			traceId: "test",
+			allowWrites: true,
+		})
+		const extract = tools.extract_action_items as unknown as {
+			execute(input: unknown): Promise<{
+				stored: Array<{
+					title: string
+					owner: string | null
+					mention: string | null
+				}>
+				duplicates: number
+			}>
+		}
+		const items = [
+			{ title: "Send the deck", owner: { name: "Priya Shah" } },
+			{ title: "Book the offsite", owner: { name: "Sam Rivera" } },
+			{ title: "Write the runbook", owner: { name: "Sam Chen" } },
+			{ title: "Unassigned follow-up" },
+		]
+
+		const first = await extract.execute({
+			items,
+			source: "meeting",
+			source_ref: "RBK test - Q4 launch sync (synthetic transcript)",
+		})
+		expect(first.stored).toHaveLength(4)
+		expect(first.duplicates).toBe(0)
+		expect(first.stored[0]?.mention).toBe("<@U1>")
+		expect(first.stored[3]?.mention).toBeNull()
+
+		const second = await extract.execute({
+			items,
+			source: "meeting",
+			source_ref: "RBK-test-q4-launch-sync-transcript-synthetic",
+		})
+		expect(second.stored).toHaveLength(0)
+		expect(second.duplicates).toBe(4)
+		expect(rows).toHaveLength(4)
 	})
 })
