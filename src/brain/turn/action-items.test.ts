@@ -95,7 +95,7 @@ function createFakeActionItemAgent(
 			)
 		}
 		if (
-			/SELECT id, title, owner, owner_name, scope, created_by, created_at/i.test(
+			/SELECT id, title, owner, owner_name, due, scope, created_by, created_at/i.test(
 				text,
 			)
 		) {
@@ -108,13 +108,14 @@ function createFakeActionItemAgent(
 					title: row.title,
 					owner: row.owner,
 					owner_name: row.owner_name,
+					due: row.due,
 					scope: row.scope,
 					created_by: row.created_by,
 					created_at: row.created_at,
 				}))
 		}
 		if (
-			/SELECT\s+id, title, owner, owner_name, source_key, source_ref, scope,/i.test(
+			/SELECT\s+id, title, owner, owner_name, due, source_key, source_ref, scope,/i.test(
 				text,
 			)
 		) {
@@ -125,6 +126,7 @@ function createFakeActionItemAgent(
 					title: row.title,
 					owner: row.owner,
 					owner_name: row.owner_name,
+					due: row.due,
 					source_key: row.source_key,
 					source_ref: row.source_ref,
 					scope: row.scope,
@@ -596,9 +598,9 @@ describe("source identity", () => {
 
 describe("batch similarity safety net", () => {
 	const pass1 = [
-		"Finalize and circulate the Q1 budget draft to finance",
-		"Send vendor spend numbers",
-		"Update the travel policy",
+		"Finance: circulate Q1 budget draft",
+		"Vendor spend numbers: pull and send to Abhishek",
+		"Travel policy update before month end",
 	]
 	const pass2 = [
 		"Circulate the Q1 budget draft to finance",
@@ -607,7 +609,7 @@ describe("batch similarity safety net", () => {
 		"Get Q1 budget signed off",
 	]
 
-	it("matches each paraphrase pair at or above the 0.6 similarity threshold", () => {
+	it("matches each paraphrase pair at or above the 0.85 similarity threshold", () => {
 		for (let index = 0; index < pass1.length; index++) {
 			const similarity = actionItemTitleSimilarity(
 				pass2[index] ?? "",
@@ -627,6 +629,36 @@ describe("batch similarity safety net", () => {
 		expect(match.matched).toBe(true)
 		expect(match.matchedCount).toBe(3)
 		expect(match.ratio).toBe(0.75)
+	})
+
+	it("does not merge Q1 and Q2 budget reports", () => {
+		const match = matchActionItemBatch(
+			[{ title: "Send the Q2 budget report", ownerKey: "id:u1" }],
+			[{ title: "Send the Q1 budget report", ownerKey: "id:u1" }],
+		)
+		expect(match.matched).toBe(false)
+		expect(match.matchedCount).toBe(0)
+	})
+
+	it("requires matching due dates", () => {
+		const match = matchActionItemBatch(
+			[
+				{
+					title: "Send the budget report",
+					ownerKey: "id:u1",
+					due: "2026-11-21",
+				},
+			],
+			[
+				{
+					title: "Send the budget report",
+					ownerKey: "id:u1",
+					due: "2026-11-20",
+				},
+			],
+		)
+		expect(match.matched).toBe(false)
+		expect(match.matchedCount).toBe(0)
 	})
 
 	it("does not merge a weak small batch", () => {
@@ -1065,9 +1097,9 @@ describe("source-level idempotence", () => {
 		const { extract, rows } = createExtractHarness()
 		const first = await extract.execute({
 			items: [
-				{ title: "Finalize and circulate the Q1 budget draft to finance" },
-				{ title: "Send vendor spend numbers" },
-				{ title: "Update the travel policy" },
+				{ title: "Finance: circulate Q1 budget draft" },
+				{ title: "Vendor spend numbers: pull and send to Abhishek" },
+				{ title: "Travel policy update before month end" },
 			],
 			source: "meeting",
 			source_ref: "1762345678.111111",
@@ -1139,6 +1171,24 @@ describe("source-level idempotence", () => {
 		expect(second.stored).toHaveLength(4)
 		expect(second.alreadyExtracted).toBe(false)
 		expect(rows).toHaveLength(7)
+	})
+
+	it("stores Q1 and Q2 budget reports as distinct items", async () => {
+		const { extract, rows } = createExtractHarness()
+		const first = await extract.execute({
+			items: [{ title: "Send the Q1 budget report" }],
+			source: "meeting",
+			source_ref: "1762345678.101010",
+		})
+		expect(first.stored).toHaveLength(1)
+		const second = await extract.execute({
+			items: [{ title: "Send the Q2 budget report" }],
+			source: "meeting",
+			source_ref: "1762345678.202020",
+		})
+		expect(second.stored).toHaveLength(1)
+		expect(second.alreadyExtracted).toBe(false)
+		expect(rows).toHaveLength(2)
 	})
 
 	it("surfaces a failed insert instead of reporting it as a duplicate", async () => {
@@ -1239,12 +1289,16 @@ describe("commitment content predicate", () => {
 		expect(hasCommitmentContent("Need to update the deck")).toBe(true)
 		expect(hasCommitmentContent("Due Friday")).toBe(true)
 		expect(hasCommitmentContent("I will follow up tomorrow")).toBe(true)
+		expect(
+			hasCommitmentContent("Alice to send the deck. Bob to book the room."),
+		).toBe(true)
 	})
 
 	it("does not treat a contentless check as a commitment", () => {
 		expect(hasCommitmentContent("quick check, please reply briefly")).toBe(
 			false,
 		)
+		expect(hasCommitmentContent("send the deck to Bob")).toBe(false)
 		expect(hasCommitmentContent("")).toBe(false)
 	})
 })
@@ -1775,8 +1829,8 @@ describe("earlier source_ref gate", () => {
 		expect(result.reason).toBeUndefined()
 	})
 
-	it("allows a source_ref equal to the current turn ts", async () => {
-		const { extract } = createExtractHarness({
+	it("grounds items when source_ref equals the current turn ts", async () => {
+		const { extract, rows } = createExtractHarness({
 			turnText: note,
 			turnTextLength: 60,
 			turnHasCommitmentContent: true,
@@ -1786,8 +1840,34 @@ describe("earlier source_ref gate", () => {
 			source: "meeting",
 			source_ref: "1762345679.000001",
 		})
-		expect(result.stored).toHaveLength(1)
-		expect(result.reason).toBeUndefined()
+		expect(result.stored).toEqual([])
+		expect(result.rejected).toEqual([
+			{
+				title: "Finalize the partner integration",
+				reason: "not_from_current_message",
+			},
+		])
+		expect(rows).toHaveLength(0)
+	})
+
+	it("grounds ungrounded items even when source is message", async () => {
+		const { extract, rows } = createExtractHarness({
+			turnText: note,
+			turnTextLength: 60,
+			turnHasCommitmentContent: true,
+		})
+		const result = await extract.execute({
+			items: [historyItem],
+			source: "message",
+		})
+		expect(result.stored).toEqual([])
+		expect(result.rejected).toEqual([
+			{
+				title: "Finalize the partner integration",
+				reason: "not_from_current_message",
+			},
+		])
+		expect(rows).toHaveLength(0)
 	})
 
 	it("leaves the source_ref path unaffected when turnText is unavailable", async () => {
@@ -1817,6 +1897,9 @@ describe("action-items prompt", () => {
 		expect(prompt).toContain("Do not wait to be asked.")
 		expect(prompt).toContain("short note rather than meeting notes")
 		expect(prompt).toContain("A contentless message")
+		expect(prompt).toContain(
+			"must be answered from list_action_items first",
+		)
 		expect(prompt).toContain("we talked about X, but we didn't decide")
 		expect(prompt).toContain("missing item is cheaper")
 		expect(prompt).toContain(

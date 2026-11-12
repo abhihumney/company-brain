@@ -270,7 +270,7 @@ export type LoadDmHistoryArgs = {
 }
 
 const PRIOR_CONTEXT_REFERENCE_RE =
-	/\b(?:that|those|them|the above|above|earlier|previous|before|the one i sent|last message|just sent|what about|same for|status of those|extract from)\b/i
+	/\b(?:that|those|them|the above|above|earlier|previous|before|the one i sent|the transcript i sent|the transcript|that transcript|i sent|sent above|sent earlier|last message|just sent|what about|same for|status of those|extract from)\b/i
 
 /**
  * Whether the current message refers to earlier conversation. A fresh message

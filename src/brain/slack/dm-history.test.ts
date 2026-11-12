@@ -174,6 +174,13 @@ describe("needsPriorContext", () => {
 		expect(
 			needsPriorContext("pull the commitments from last message"),
 		).toBe(true)
+		expect(
+			needsPriorContext(
+				"extract the action items from the transcript I sent",
+			),
+		).toBe(true)
+		expect(needsPriorContext("use the transcript")).toBe(true)
+		expect(needsPriorContext("the transcript i sent earlier")).toBe(true)
 	})
 
 	it("does not load prior context for fresh notes or questions", () => {

@@ -212,6 +212,7 @@ export function findNonDecisionMarker(
 const SPEAKER_LINE_RE = /^\s*[A-Z][A-Za-z0-9 .'’_-]{0,40}:\s+\S/m
 const TRANSCRIPT_MARKER_RE =
 	/\b(?:transcript|meeting notes|meeting transcript|attendees|agenda)\b/i
+const NAME_TO_VERB_RE = /\b[A-Z][a-z]+ to [a-z]+/
 const COMMITMENT_CUE_RE = new RegExp(
 	[
 		"\\bi(?:'|’)ll\\b",
@@ -251,7 +252,8 @@ export function hasCommitmentContent(text: string): boolean {
 	return (
 		SPEAKER_LINE_RE.test(normalized) ||
 		TRANSCRIPT_MARKER_RE.test(normalized) ||
-		COMMITMENT_CUE_RE.test(normalized)
+		COMMITMENT_CUE_RE.test(normalized) ||
+		NAME_TO_VERB_RE.test(normalized)
 	)
 }
 
@@ -420,11 +422,11 @@ export async function buildTitleFallbackSourceKey(input: {
 	return `title:${await sha256Hex(payloads.join("\n"))}`
 }
 
-export const ACTION_ITEM_SIMILARITY_THRESHOLD = 0.6
+// Source-key dedupe is the primary mechanism. The similarity net is a
+// conservative fallback: a high Jaccard threshold plus matching due dates.
+export const ACTION_ITEM_SIMILARITY_THRESHOLD = 0.85
 export const ACTION_ITEM_BATCH_MATCH_THRESHOLD = 0.6
 
-// "before" is intentionally included so "Update the travel policy" and
-// "Update the travel policy before month end" reach the 0.6 match threshold.
 const ACTION_ITEM_TITLE_STOPWORDS = new Set([
 	"a",
 	"an",
@@ -561,6 +563,7 @@ export function isActionItemGroundedInTurn(
 export type ActionItemSimilarityItem = {
 	title: string
 	ownerKey: string
+	due?: string | null
 	id?: string
 	sourceKey?: string
 }
@@ -581,9 +584,10 @@ export type ActionItemSimilarityMatch = {
 
 /**
  * Batch-level safety net. A new source is treated as the same extraction when
- * at least 60% of incoming items match an existing item (same owner key) at
- * Jaccard similarity 0.6 or better. Matching is greedy one-to-one: once an
- * existing item is matched it cannot satisfy another incoming item.
+ * at least 60% of incoming items match an existing item with the same owner
+ * key, the same due date, and Jaccard similarity 0.85 or better. Matching is
+ * greedy one-to-one: once an existing item is matched it cannot satisfy
+ * another incoming item.
  */
 export function matchActionItemBatch(
 	incoming: ReadonlyArray<ActionItemSimilarityItem>,
@@ -603,6 +607,7 @@ export function matchActionItemBatch(
 		for (const [existingIndex, candidate] of existing.entries()) {
 			if (usedExisting.has(existingIndex)) continue
 			if (candidate.ownerKey !== item.ownerKey) continue
+			if ((candidate.due ?? "") !== (item.due ?? "")) continue
 			const similarity = actionItemTitleSimilarity(item.title, candidate.title)
 			if (!best || similarity > best.similarity) {
 				best = { existingIndex, existing: candidate, similarity }
@@ -1040,6 +1045,7 @@ export type StoredActionItemMatchRow = {
 	title: string
 	owner: string | null
 	ownerName: string | null
+	due: string | null
 	createdAt: number
 }
 
@@ -1080,11 +1086,12 @@ export function listStoredActionItemRowsForSource(
 		title: string
 		owner: string | null
 		owner_name: string | null
+		due: string | null
 		scope: string
 		created_by: string | null
 		created_at: number
 	}>`
-		SELECT id, title, owner, owner_name, scope, created_by, created_at
+		SELECT id, title, owner, owner_name, due, scope, created_by, created_at
 		FROM brain_action_item
 		WHERE scope = ${scope} AND source_key = ${sourceKey}
 		ORDER BY created_at ASC, id ASC
@@ -1096,6 +1103,7 @@ export function listStoredActionItemRowsForSource(
 			title: row.title,
 			owner: row.owner,
 			ownerName: row.owner_name,
+			due: row.due,
 			createdAt: row.created_at,
 		}))
 }
@@ -1153,6 +1161,7 @@ export type ActionItemSourceBatch = {
 		title: string
 		owner: string | null
 		ownerName: string | null
+		due: string | null
 	}>
 }
 
@@ -1167,6 +1176,7 @@ export function listActionItemGroups(
 		title: string
 		owner: string | null
 		owner_name: string | null
+		due: string | null
 		source_key: string | null
 		source_ref: string | null
 		scope: string
@@ -1174,7 +1184,7 @@ export function listActionItemGroups(
 		created_at: number
 	}>`
 		SELECT
-			id, title, owner, owner_name, source_key, source_ref, scope,
+			id, title, owner, owner_name, due, source_key, source_ref, scope,
 			created_by, created_at
 		FROM brain_action_item
 		WHERE scope = ${scope}
@@ -1203,6 +1213,7 @@ export function listActionItemGroups(
 			title: row.title,
 			owner: row.owner,
 			ownerName: row.owner_name,
+			due: row.due,
 		})
 		group.itemCount = group.items.length
 		group.createdAt = Math.min(group.createdAt, row.created_at)
@@ -1228,6 +1239,7 @@ export function matchActionItemSourceBatch(
 				id: item.id,
 				title: item.title,
 				ownerKey: ownerDedupeKeyPart(item.owner, item.ownerName),
+				due: item.due,
 				sourceKey: batch.sourceKey,
 			})),
 		)
@@ -1281,6 +1293,7 @@ function matchRowsToSimilarity(
 		id: row.id,
 		title: row.title,
 		ownerKey: ownerDedupeKeyPart(row.owner, row.ownerName),
+		due: row.due,
 	}))
 }
 
@@ -1327,6 +1340,7 @@ export function storeActionItemBatch(
 		(item) => ({
 			title: item.title,
 			ownerKey: ownerDedupeKeyPart(item.ownerId, item.ownerName),
+			due: item.due,
 		}),
 	)
 	let matchedItems: ActionItemSimilarityMatch["matches"] = []
@@ -1813,6 +1827,10 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 			// message" path. It is only allowed when the current user message
 			// actually asks for an earlier extraction.
 			const currentTurnTs = turnTs?.trim()
+			const sourceRefIsEarlierTs =
+				sourceRef !== null &&
+				SLACK_MESSAGE_TS_RE.test(sourceRef) &&
+				sourceRef !== currentTurnTs
 			if (
 				sourceRef &&
 				turnText !== undefined &&
@@ -1859,13 +1877,12 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 					rejected.push({ title, reason: "non-decision" })
 					continue
 				}
-				// When the source is the current turn, every item must be
-				// grounded in what the user just sent. Supplies of an explicit
-				// source_ref are the earlier-message path and skip this check.
+				// Ground every current-turn item, regardless of its source label.
+				// A source_ref that points at a different Slack message is the
+				// explicit earlier-message path and skips this check.
 				if (
-					input.source === "meeting" &&
-					!sourceRef &&
 					turnText !== undefined &&
+					!sourceRefIsEarlierTs &&
 					!isActionItemGroundedInTurn(
 						{ title, evidence: item.evidence },
 						turnText,
