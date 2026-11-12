@@ -2901,6 +2901,7 @@ async function runSlackTurnInner(
 			: fencedProgress(agent, turnControl, stream.progress),
 		interaction,
 		slackLookup,
+		slackTurnTs: ev.ts,
 		mentionedSlackUserIds: mentionedSlackIds,
 		memoryTagSlackUserIds,
 		agentMainEffort: opts?.agentMainEffort,

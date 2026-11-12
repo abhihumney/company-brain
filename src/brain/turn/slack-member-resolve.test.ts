@@ -49,6 +49,12 @@ const DIRECTORY: SlackMember[] = [
 		email: "anne@example.com",
 	}),
 	member({
+		id: "U123456",
+		name: "Id Person",
+		handle: "idperson",
+		email: "id@example.com",
+	}),
+	member({
 		id: "UBOT",
 		name: "Sam Bot",
 		handle: "sambot",
@@ -176,6 +182,24 @@ describe("resolveSlackMemberReference", () => {
 		if (withAt.status !== "resolved") return
 		expect(withAt.member.id).toBe("U1")
 		expect(withAt.matchedBy).toBe("handle")
+	})
+
+	it("resolves native mentions and raw Slack user ids by id", () => {
+		const mention = resolve({ name: "<@U1>" })
+		expect(mention.status).toBe("resolved")
+		if (mention.status !== "resolved") return
+		expect(mention.member.id).toBe("U1")
+		expect(mention.matchedBy).toBe("id")
+
+		const rawId = resolve({ handle: "U123456" })
+		expect(rawId.status).toBe("resolved")
+		if (rawId.status !== "resolved") return
+		expect(rawId.member.id).toBe("U123456")
+		expect(rawId.matchedBy).toBe("id")
+
+		expect(resolve({ name: "<@U999999>" })).toEqual({
+			status: "unresolved",
+		})
 	})
 
 	it("handles punctuation, case, and non-breaking spaces in names", () => {

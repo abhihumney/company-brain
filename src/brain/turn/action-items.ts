@@ -21,6 +21,7 @@ export const ACTION_ITEM_SOURCES = ["meeting", "message", "manual"] as const
 export type ActionItemSource = (typeof ACTION_ITEM_SOURCES)[number]
 
 export type ActionItemOwnerResolution =
+	| "id"
 	| "email"
 	| "handle"
 	| "name"
@@ -38,9 +39,11 @@ export type BrainActionItem = {
 	status: ActionItemStatus
 	source: ActionItemSource
 	source_ref: string | null
+	source_key: string | null
 	scope: string
 	due: string | null
 	evidence: string | null
+	created_by: string | null
 	dedupe_key: string
 	created_at: number
 	updated_at: number
@@ -68,9 +71,11 @@ type ActionItemRow = {
 	status: string
 	source: string
 	source_ref: string | null
+	source_key: string | null
 	scope: string
 	due: string | null
 	evidence: string | null
+	created_by: string | null
 	dedupe_key: string
 	created_at: number
 	updated_at: number
@@ -88,17 +93,47 @@ export function ensureActionItemTable(agent: CompanyBrainAgent): void {
 			status TEXT NOT NULL DEFAULT 'open',
 			source TEXT NOT NULL,
 			source_ref TEXT,
+			source_key TEXT,
 			scope TEXT NOT NULL,
 			due TEXT,
 			evidence TEXT,
+			created_by TEXT,
 			dedupe_key TEXT NOT NULL UNIQUE,
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL
 		)
 	`
+	// Idempotent upgrades for tables created before source-level idempotence
+	// and DM visibility landed. Existing rows keep NULL in both columns.
+	const columns = agent.sql<{ name: string }>`
+		PRAGMA table_info(brain_action_item)
+	`
+	const names = new Set(columns.map((column) => column.name))
+	if (!names.has("source_key")) {
+		agent.sql`ALTER TABLE brain_action_item ADD COLUMN source_key TEXT`
+	}
+	if (!names.has("created_by")) {
+		agent.sql`ALTER TABLE brain_action_item ADD COLUMN created_by TEXT`
+	}
 	agent.sql`
 		CREATE INDEX IF NOT EXISTS brain_action_item_status_owner
 		ON brain_action_item (status, owner)
+	`
+	agent.sql`
+		CREATE INDEX IF NOT EXISTS brain_action_item_source_key
+		ON brain_action_item (scope, source_key)
+	`
+}
+
+export function ensureActionItemSourceTable(agent: CompanyBrainAgent): void {
+	agent.sql`
+		CREATE TABLE IF NOT EXISTS brain_action_item_source (
+			scope TEXT NOT NULL,
+			source_key TEXT NOT NULL,
+			item_count INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (scope, source_key)
+		)
 	`
 }
 
@@ -173,6 +208,265 @@ export async function buildActionItemDedupeKey(input: {
 	return sha256Hex(actionItemDedupePayload(input))
 }
 
+/**
+ * Unique row key for a Slack-identified source. Item text is deliberately not
+ * part of it: two different transcripts may legitimately produce the same
+ * title, and source-level idempotence already prevents re-extraction of the
+ * same source.
+ */
+export async function buildActionItemRowKey(
+	sourceKey: string,
+	index: number,
+): Promise<string> {
+	return sha256Hex(`${sourceKey}\u0000${index}`)
+}
+
+export const SLACK_MESSAGE_TS_RE = /^\d{9,12}\.\d{6}$/
+export const SLACK_FILE_ID_RE = /^F[A-Z0-9]+$/
+
+export type ActionItemSourceKind =
+	| "slack_message"
+	| "slack_file"
+	| "turn_message"
+	| "title_fallback"
+
+export type ActionItemSourceIdentity = {
+	sourceKey: string
+	kind: ActionItemSourceKind
+	warning?: string
+}
+
+/**
+ * Resolve the source identity used for source-level idempotence. Only a real
+ * Slack message ts or file id becomes identity; any other model-written
+ * source_ref is ignored in favour of the current turn's message ts.
+ */
+export function resolveActionItemSourceIdentity(input: {
+	sourceRef?: string | null
+	channelId?: string | null
+	turnTs?: string | null
+}): ActionItemSourceIdentity | undefined {
+	const sourceRef = input.sourceRef?.trim() ?? ""
+	const channelId = input.channelId?.trim() ?? ""
+	const turnTs = input.turnTs?.trim() ?? ""
+	if (sourceRef && SLACK_MESSAGE_TS_RE.test(sourceRef) && channelId) {
+		return {
+			sourceKey: `slack:${channelId}:${sourceRef}`,
+			kind: "slack_message",
+		}
+	}
+	if (sourceRef && SLACK_FILE_ID_RE.test(sourceRef)) {
+		return { sourceKey: `file:${sourceRef}`, kind: "slack_file" }
+	}
+	if (turnTs && channelId) {
+		return {
+			sourceKey: `slack:${channelId}:${turnTs}`,
+			kind: "turn_message",
+			...(sourceRef
+				? {
+						warning:
+							"source_ref was not a Slack message ts or file id, so the current turn's message ts was used as the source identity.",
+					}
+				: {}),
+		}
+	}
+	return undefined
+}
+
+export const TITLE_FALLBACK_SOURCE_WARNING =
+	"No Slack source identity was available (non-Slack turn), so a title-based source key is the last resort. Re-extractions with paraphrased titles may not deduplicate."
+
+/** Last-resort source key for non-Slack turns: hash of the batch's item keys. */
+export async function buildTitleFallbackSourceKey(input: {
+	scope: string
+	items: ReadonlyArray<{
+		title: string
+		ownerId?: string | null
+		ownerName?: string | null
+	}>
+}): Promise<string> {
+	const payloads = input.items
+		.map((item) =>
+			actionItemDedupePayload({
+				scope: input.scope,
+				title: item.title,
+				ownerId: item.ownerId,
+				ownerName: item.ownerName,
+			}),
+		)
+		.sort()
+	return `title:${await sha256Hex(payloads.join("\n"))}`
+}
+
+export const ACTION_ITEM_SIMILARITY_THRESHOLD = 0.6
+export const ACTION_ITEM_BATCH_MATCH_THRESHOLD = 0.6
+
+// "before" is intentionally included so "Update the travel policy" and
+// "Update the travel policy before month end" reach the 0.6 match threshold.
+const ACTION_ITEM_TITLE_STOPWORDS = new Set([
+	"a",
+	"an",
+	"and",
+	"are",
+	"as",
+	"at",
+	"be",
+	"before",
+	"but",
+	"by",
+	"for",
+	"from",
+	"has",
+	"have",
+	"he",
+	"her",
+	"him",
+	"his",
+	"i",
+	"if",
+	"in",
+	"into",
+	"is",
+	"it",
+	"its",
+	"me",
+	"my",
+	"no",
+	"not",
+	"of",
+	"on",
+	"or",
+	"our",
+	"she",
+	"so",
+	"than",
+	"that",
+	"the",
+	"their",
+	"them",
+	"then",
+	"there",
+	"these",
+	"they",
+	"this",
+	"those",
+	"to",
+	"up",
+	"us",
+	"was",
+	"we",
+	"were",
+	"what",
+	"when",
+	"where",
+	"which",
+	"who",
+	"will",
+	"with",
+	"you",
+	"your",
+])
+
+function singularizeTitleToken(token: string): string {
+	if (token.length <= 3) return token
+	if (token.endsWith("ies")) return `${token.slice(0, -3)}y`
+	if (/(?:ches|shes|xes|zes|ses)$/.test(token)) return token.slice(0, -2)
+	if (token.endsWith("s") && !token.endsWith("ss")) return token.slice(0, -1)
+	return token
+}
+
+export function actionItemTitleTokens(title: string): Set<string> {
+	const normalized = title
+		.normalize("NFKC")
+		.toLowerCase()
+		.replace(/[^\p{L}\p{N}]+/gu, " ")
+		.trim()
+	const tokens = new Set<string>()
+	for (const token of normalized.split(/\s+/)) {
+		if (!token || ACTION_ITEM_TITLE_STOPWORDS.has(token)) continue
+		tokens.add(singularizeTitleToken(token))
+	}
+	return tokens
+}
+
+/** Jaccard similarity over normalised title token sets. */
+export function actionItemTitleSimilarity(a: string, b: string): number {
+	const left = actionItemTitleTokens(a)
+	const right = actionItemTitleTokens(b)
+	if (!left.size || !right.size) return 0
+	let intersection = 0
+	for (const token of left) if (right.has(token)) intersection += 1
+	const union = left.size + right.size - intersection
+	return union ? intersection / union : 0
+}
+
+export type ActionItemSimilarityItem = {
+	title: string
+	ownerKey: string
+	id?: string
+	sourceKey?: string
+}
+
+export type ActionItemSimilarityMatch = {
+	matched: boolean
+	matchedCount: number
+	totalCount: number
+	ratio: number
+	matches: Array<{
+		incomingTitle: string
+		existingTitle: string
+		existingId?: string
+		similarity: number
+	}>
+}
+
+/**
+ * Batch-level safety net. A new source is treated as the same extraction when
+ * at least 60% of incoming items match an existing item (same owner key) at
+ * Jaccard similarity 0.6 or better. The ratio threshold is what prevents a
+ * single weak match from merging a small, unrelated batch.
+ */
+export function matchActionItemBatch(
+	incoming: ReadonlyArray<ActionItemSimilarityItem>,
+	existing: ReadonlyArray<ActionItemSimilarityItem>,
+): ActionItemSimilarityMatch {
+	const matches: ActionItemSimilarityMatch["matches"] = []
+	let matchedCount = 0
+	for (const item of incoming) {
+		let best:
+			| {
+					existing: ActionItemSimilarityItem
+					similarity: number
+			  }
+			| undefined
+		for (const candidate of existing) {
+			if (candidate.ownerKey !== item.ownerKey) continue
+			const similarity = actionItemTitleSimilarity(item.title, candidate.title)
+			if (!best || similarity > best.similarity) {
+				best = { existing: candidate, similarity }
+			}
+		}
+		if (best && best.similarity >= ACTION_ITEM_SIMILARITY_THRESHOLD) {
+			matchedCount += 1
+			matches.push({
+				incomingTitle: item.title,
+				existingTitle: best.existing.title,
+				existingId: best.existing.id,
+				similarity: best.similarity,
+			})
+		}
+	}
+	const totalCount = incoming.length
+	const ratio = totalCount ? matchedCount / totalCount : 0
+	return {
+		matched: totalCount > 0 && ratio >= ACTION_ITEM_BATCH_MATCH_THRESHOLD,
+		matchedCount,
+		totalCount,
+		ratio,
+		matches,
+	}
+}
+
 export function isValidActionItemStatus(
 	value: string,
 ): value is ActionItemStatus {
@@ -234,9 +528,10 @@ export function actionItemScopeForSurface(surface: ActionItemSurface): string {
 }
 
 /**
- * A public channel sees only public items. A private channel sees its own
- * private items plus public ones. A DM sees the whole org ledger. When the
- * surface is unknown, only unclassified items are visible — the strict default.
+ * Scope-only read rule for channel surfaces. DM reads must use
+ * isActionItemVisibleToAsker, because DM visibility also depends on owner and
+ * created_by. When the surface is unknown, only unclassified items are
+ * visible — the strict default.
  */
 export function isActionItemVisibleOnSurface(
 	scope: string,
@@ -248,6 +543,31 @@ export function isActionItemVisibleOnSurface(
 	return (
 		scope === `private:${surface.channelId}` || scope.startsWith("public:")
 	)
+}
+
+export type ActionItemVisibility = Pick<
+	BrainActionItem,
+	"owner" | "scope" | "created_by"
+>
+
+/**
+ * Read rule with asker identity. In a DM the ledger shows only items owned by
+ * the asker, DM items the asker captured, and public items. Private-channel
+ * items appear in a DM only when the asker owns them; legacy rows with no
+ * creator are not shown in DMs.
+ */
+export function isActionItemVisibleToAsker(
+	item: ActionItemVisibility,
+	surface: ActionItemSurface,
+	askerSlackUserId?: string | null,
+): boolean {
+	if (surface.kind !== "dm") {
+		return isActionItemVisibleOnSurface(item.scope, surface)
+	}
+	const asker = askerSlackUserId?.trim() ?? ""
+	if (asker && item.owner === asker) return true
+	if (item.scope.startsWith("public:")) return true
+	return Boolean(asker) && item.scope === "dm" && item.created_by === asker
 }
 
 /**
@@ -269,20 +589,25 @@ export function actionItemSurfaceForSlackLookup(
 	lookup?: ActionItemSlackSurfaceInput,
 ): ActionItemSurface {
 	if (!lookup) return { kind: "unknown" }
+	// Never infer privacy from the channel id prefix: "C" channels can be
+	// private. Without an explicit memory scope the only safe answer is unknown.
+	const kind = lookup.memoryScope?.kind
+	if (!kind) return { kind: "unknown" }
+	if (kind === "dm") return { kind: "dm" }
 	const channelId = lookup.memoryScope?.channelId?.trim() || lookup.channel.trim()
-	if (lookup.memoryScope?.kind === "dm") return { kind: "dm" }
-	if (!lookup.memoryScope && channelId.startsWith("D")) return { kind: "dm" }
-	if (lookup.memoryScope?.kind === "private_channel" && channelId) {
+	if (kind === "private_channel" && channelId) {
 		return { kind: "private_channel", channelId }
 	}
-	if (channelId) return { kind: "public_channel", channelId }
+	if (kind === "shared" && channelId) {
+		return { kind: "public_channel", channelId }
+	}
 	return { kind: "unknown" }
 }
 
 export function describeActionItemSurface(surface: ActionItemSurface): string {
 	switch (surface.kind) {
 		case "dm":
-			return "direct message (all org action items are visible)"
+			return "direct message (your own items, DM items you captured, and public items are visible)"
 		case "private_channel":
 			return `private channel ${surface.channelId} (its private items plus public items are visible)`
 		case "public_channel":
@@ -308,6 +633,7 @@ function asActionItemSource(value: string): ActionItemSource {
 
 function asOwnerResolution(value: string | null): ActionItemOwnerResolution {
 	if (
+		value === "id" ||
 		value === "email" ||
 		value === "handle" ||
 		value === "name" ||
@@ -330,9 +656,11 @@ function mapActionItemRow(row: ActionItemRow): BrainActionItem {
 		status: asActionItemStatus(row.status),
 		source: asActionItemSource(row.source),
 		source_ref: row.source_ref,
+		source_key: row.source_key,
 		scope: row.scope,
 		due: row.due,
 		evidence: row.evidence,
+		created_by: row.created_by,
 		dedupe_key: row.dedupe_key,
 		created_at: row.created_at,
 		updated_at: row.updated_at,
@@ -348,21 +676,33 @@ export type ActionItemInsert = {
 	status?: ActionItemStatus
 	source: ActionItemSource
 	sourceRef?: string | null
+	sourceKey?: string | null
 	scope: string
 	due?: string | null
 	evidence?: string | null
+	createdBy?: string | null
 	dedupeKey: string
 	now?: number
 }
 
+export type ActionItemInsertResult =
+	| { status: "inserted"; id: string }
+	| { status: "conflict"; id: string }
+	| { status: "failed"; error: string }
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error)
+}
+
 /**
- * Insert one item, deduping on dedupe_key. Returns the existing id when the
- * item was already stored.
+ * Insert one item. A conflict is a real existing row with the same dedupe key;
+ * a failed write is reported separately so it can never be counted as a
+ * duplicate.
  */
 export function insertActionItem(
 	agent: CompanyBrainAgent,
 	item: ActionItemInsert,
-): { inserted: boolean; id: string } {
+): ActionItemInsertResult {
 	// Validate at the write boundary too: callers are typed, but persisted
 	// rows must never carry a status, source, scope, or due the ledger rejects.
 	const status = item.status ?? "open"
@@ -379,32 +719,55 @@ export function insertActionItem(
 	if (!due.ok) throw new Error(`Invalid action item due date: ${due.error}`)
 
 	ensureActionItemTable(agent)
-	const existing = agent.sql<{ id: string }>`
-		SELECT id FROM brain_action_item WHERE dedupe_key = ${item.dedupeKey} LIMIT 1
-	`
-	const existingId = existing[0]?.id
-	if (existingId) return { inserted: false, id: existingId }
+	try {
+		const existing = agent.sql<{ id: string }>`
+			SELECT id FROM brain_action_item WHERE dedupe_key = ${item.dedupeKey} LIMIT 1
+		`
+		const existingId = existing[0]?.id
+		if (existingId) return { status: "conflict", id: existingId }
+	} catch (error) {
+		return { status: "failed", error: errorMessage(error) }
+	}
 
 	const id = `act_${crypto.randomUUID()}`
 	const now = item.now ?? Date.now()
-	agent.sql`
-		INSERT INTO brain_action_item (
-			id, title, detail, owner, owner_name, owner_resolution, status, source,
-			source_ref, scope, due, evidence, dedupe_key, created_at, updated_at
-		) VALUES (
-			${id}, ${item.title}, ${item.detail ?? null}, ${item.owner ?? null},
-			${item.ownerName ?? null}, ${item.ownerResolution ?? null},
-			${status}, ${item.source}, ${item.sourceRef ?? null},
-			${item.scope}, ${due.due}, ${item.evidence ?? null},
-			${item.dedupeKey}, ${now}, ${now}
-		)
-		ON CONFLICT(dedupe_key) DO NOTHING
-	`
-	const stored = agent.sql<{ id: string }>`
-		SELECT id FROM brain_action_item WHERE dedupe_key = ${item.dedupeKey} LIMIT 1
-	`
-	const storedId = stored[0]?.id
-	return { inserted: storedId === id, id: storedId ?? id }
+	try {
+		agent.sql`
+			INSERT INTO brain_action_item (
+				id, title, detail, owner, owner_name, owner_resolution, status,
+				source, source_ref, source_key, scope, due, evidence, created_by,
+				dedupe_key, created_at, updated_at
+			) VALUES (
+				${id}, ${item.title}, ${item.detail ?? null}, ${item.owner ?? null},
+				${item.ownerName ?? null}, ${item.ownerResolution ?? null},
+				${status}, ${item.source}, ${item.sourceRef ?? null},
+				${item.sourceKey ?? null}, ${item.scope}, ${due.due},
+				${item.evidence ?? null}, ${item.createdBy ?? null},
+				${item.dedupeKey}, ${now}, ${now}
+			)
+			ON CONFLICT(dedupe_key) DO NOTHING
+		`
+	} catch (error) {
+		return { status: "failed", error: errorMessage(error) }
+	}
+
+	try {
+		const stored = agent.sql<{ id: string }>`
+			SELECT id FROM brain_action_item WHERE dedupe_key = ${item.dedupeKey} LIMIT 1
+		`
+		const storedId = stored[0]?.id
+		if (!storedId) {
+			return {
+				status: "failed",
+				error: "insert did not persist a brain_action_item row",
+			}
+		}
+		return storedId === id
+			? { status: "inserted", id }
+			: { status: "conflict", id: storedId }
+	} catch (error) {
+		return { status: "failed", error: errorMessage(error) }
+	}
 }
 
 export type ListActionItemsInput = {
@@ -442,6 +805,7 @@ export function listActionItems(
 	agent: CompanyBrainAgent,
 	surface: ActionItemSurface,
 	input: ListActionItemsInput = {},
+	askerSlackUserId?: string | null,
 ): ListActionItemsResult {
 	ensureActionItemTable(agent)
 	const rows = agent.sql<ActionItemRow>`
@@ -451,7 +815,9 @@ export function listActionItems(
 	const ownerFilter = input.owner ? normalizeActionItemOwnerFilter(input.owner) : ""
 	const visible = rows
 		.map(mapActionItemRow)
-		.filter((item) => isActionItemVisibleOnSurface(item.scope, surface))
+		.filter((item) =>
+			isActionItemVisibleToAsker(item, surface, askerSlackUserId),
+		)
 		.filter((item) => !input.source || item.source === input.source)
 		.filter((item) => matchesOwnerFilter(item, ownerFilter))
 
@@ -476,6 +842,356 @@ export function listActionItems(
 	}
 }
 
+export type ActionItemSourceRow = {
+	scope: string
+	source_key: string
+	item_count: number
+	created_at: number
+}
+
+export type StoredActionItemSummary = {
+	id: string
+	title: string
+}
+
+export function lookupActionItemSource(
+	agent: CompanyBrainAgent,
+	scope: string,
+	sourceKey: string,
+): ActionItemSourceRow | undefined {
+	ensureActionItemSourceTable(agent)
+	const rows = agent.sql<ActionItemSourceRow>`
+		SELECT scope, source_key, item_count, created_at
+		FROM brain_action_item_source
+		WHERE scope = ${scope} AND source_key = ${sourceKey}
+		LIMIT 1
+	`
+	return rows[0]
+}
+
+export function listStoredActionItemsForSource(
+	agent: CompanyBrainAgent,
+	scope: string,
+	sourceKey: string,
+): StoredActionItemSummary[] {
+	ensureActionItemTable(agent)
+	return agent.sql<StoredActionItemSummary>`
+		SELECT id, title FROM brain_action_item
+		WHERE scope = ${scope} AND source_key = ${sourceKey}
+		ORDER BY created_at ASC, id ASC
+	`
+}
+
+export function recordActionItemSource(
+	agent: CompanyBrainAgent,
+	scope: string,
+	sourceKey: string,
+	itemCount: number,
+	now = Date.now(),
+): void {
+	ensureActionItemSourceTable(agent)
+	agent.sql`
+		INSERT INTO brain_action_item_source (
+			scope, source_key, item_count, created_at
+		) VALUES (${scope}, ${sourceKey}, ${itemCount}, ${now})
+		ON CONFLICT(scope, source_key) DO NOTHING
+	`
+}
+
+export type ActionItemSourceBatch = {
+	sourceKey: string
+	itemCount: number
+	createdAt: number
+	items: Array<{
+		id: string
+		title: string
+		owner: string | null
+		ownerName: string | null
+	}>
+}
+
+export function listActionItemSourceBatches(
+	agent: CompanyBrainAgent,
+	scope: string,
+): ActionItemSourceBatch[] {
+	ensureActionItemSourceTable(agent)
+	ensureActionItemTable(agent)
+	const rows = agent.sql<{
+		source_key: string
+		item_count: number
+		created_at: number
+		id: string | null
+		title: string | null
+		owner: string | null
+		owner_name: string | null
+	}>`
+		SELECT
+			s.source_key, s.item_count, s.created_at,
+			i.id AS id, i.title AS title, i.owner AS owner, i.owner_name AS owner_name
+		FROM brain_action_item_source s
+		LEFT JOIN brain_action_item i
+			ON i.scope = s.scope AND i.source_key = s.source_key
+		WHERE s.scope = ${scope}
+		ORDER BY s.created_at DESC, s.source_key ASC
+	`
+	const byKey = new Map<string, ActionItemSourceBatch>()
+	for (const row of rows) {
+		let batch = byKey.get(row.source_key)
+		if (!batch) {
+			batch = {
+				sourceKey: row.source_key,
+				itemCount: row.item_count,
+				createdAt: row.created_at,
+				items: [],
+			}
+			byKey.set(row.source_key, batch)
+		}
+		if (row.id && row.title) {
+			batch.items.push({
+				id: row.id,
+				title: row.title,
+				owner: row.owner,
+				ownerName: row.owner_name,
+			})
+		}
+	}
+	return [...byKey.values()]
+}
+
+export type ActionItemSourceBatchMatch = {
+	batch: ActionItemSourceBatch
+	match: ActionItemSimilarityMatch
+}
+
+/** Best matching existing source batch for an incoming batch, if any. */
+export function matchActionItemSourceBatch(
+	incoming: ReadonlyArray<ActionItemSimilarityItem>,
+	batches: ReadonlyArray<ActionItemSourceBatch>,
+): ActionItemSourceBatchMatch | undefined {
+	let best: ActionItemSourceBatchMatch | undefined
+	for (const batch of batches) {
+		const match = matchActionItemBatch(
+			incoming,
+			batch.items.map((item) => ({
+				id: item.id,
+				title: item.title,
+				ownerKey: ownerDedupeKeyPart(item.owner, item.ownerName),
+				sourceKey: batch.sourceKey,
+			})),
+		)
+		if (!match.matched) continue
+		if (!best || match.ratio > best.match.ratio) best = { batch, match }
+	}
+	return best
+}
+
+export type StoredActionItemOutput = {
+	id: string
+	title: string
+	owner: string | null
+	ownerName: string | null
+	mention: string | null
+	status: ActionItemStatus
+}
+
+export type StoreActionItemBatchItem = {
+	title: string
+	detail: string | null
+	evidence: string | null
+	due: string | null
+	ownerId: string | null
+	ownerName: string | null
+	ownerResolution: ActionItemOwnerResolution
+	dedupeKey: string
+}
+
+export type StoreActionItemBatchResult = {
+	status: "stored" | "already_extracted" | "similar_batch" | "partial" | "failed"
+	stored: StoredActionItemOutput[]
+	duplicates: number
+	conflicts: Array<{ title: string; existingId: string }>
+	failed: Array<{ title: string; reason: string }>
+	previouslyStored: StoredActionItemSummary[]
+	matchedSource?: {
+		sourceKey: string
+		itemCount: number
+		createdAt: number
+	}
+	matchedItems?: ActionItemSimilarityMatch["matches"]
+	sourceTracked: boolean
+	sourceError?: string
+}
+
+/**
+ * Synchronous source-level idempotence block. There is deliberately no await
+ * between the source SELECT, the item inserts, and the source INSERT, so two
+ * interleaved DO calls cannot both store the same source.
+ */
+export function storeActionItemBatch(
+	agent: CompanyBrainAgent,
+	args: {
+		scope: string
+		sourceKey: string
+		source: ActionItemSource
+		sourceRef: string | null
+		createdBy: string | null
+		items: ReadonlyArray<StoreActionItemBatchItem>
+		now?: number
+	},
+): StoreActionItemBatchResult {
+	const existing = lookupActionItemSource(agent, args.scope, args.sourceKey)
+	if (existing) {
+		return {
+			status: "already_extracted",
+			stored: [],
+			duplicates: existing.item_count,
+			conflicts: [],
+			failed: [],
+			previouslyStored: listStoredActionItemsForSource(
+				agent,
+				args.scope,
+				args.sourceKey,
+			),
+			sourceTracked: true,
+		}
+	}
+
+	const incomingSimilarity: ActionItemSimilarityItem[] = args.items.map(
+		(item) => ({
+			title: item.title,
+			ownerKey: ownerDedupeKeyPart(item.ownerId, item.ownerName),
+		}),
+	)
+	const similarity = matchActionItemSourceBatch(
+		incomingSimilarity,
+		listActionItemSourceBatches(agent, args.scope),
+	)
+	if (similarity) {
+		return {
+			status: "similar_batch",
+			stored: [],
+			duplicates: similarity.batch.itemCount,
+			conflicts: [],
+			failed: [],
+			previouslyStored: similarity.batch.items.map((item) => ({
+				id: item.id,
+				title: item.title,
+			})),
+			matchedSource: {
+				sourceKey: similarity.batch.sourceKey,
+				itemCount: similarity.batch.itemCount,
+				createdAt: similarity.batch.createdAt,
+			},
+			matchedItems: similarity.match.matches,
+			sourceTracked: false,
+		}
+	}
+
+	const now = args.now ?? Date.now()
+	const stored: StoredActionItemOutput[] = []
+	const conflicts: Array<{ title: string; existingId: string }> = []
+	const failed: Array<{ title: string; reason: string }> = []
+	for (const item of args.items) {
+		const insert = insertActionItem(agent, {
+			title: item.title,
+			detail: item.detail,
+			evidence: item.evidence,
+			due: item.due,
+			owner: item.ownerId,
+			ownerName: item.ownerName,
+			ownerResolution: item.ownerResolution,
+			status: "open",
+			source: args.source,
+			sourceRef: args.sourceRef,
+			sourceKey: args.sourceKey,
+			scope: args.scope,
+			createdBy: args.createdBy,
+			dedupeKey: item.dedupeKey,
+			now,
+		})
+		if (insert.status === "inserted") {
+			stored.push({
+				id: insert.id,
+				title: item.title,
+				owner: item.ownerId,
+				ownerName: item.ownerName,
+				mention: item.ownerId ? `<@${item.ownerId}>` : null,
+				status: "open",
+			})
+			continue
+		}
+		if (insert.status === "conflict") {
+			conflicts.push({ title: item.title, existingId: insert.id })
+			continue
+		}
+		failed.push({ title: item.title, reason: insert.error })
+	}
+
+	let sourceTracked = false
+	let sourceError: string | undefined
+	if (stored.length && !failed.length && !conflicts.length) {
+		try {
+			recordActionItemSource(agent, args.scope, args.sourceKey, stored.length, now)
+			sourceTracked = true
+		} catch (error) {
+			sourceError = errorMessage(error)
+		}
+	}
+
+	const status: StoreActionItemBatchResult["status"] = failed.length
+		? stored.length || conflicts.length
+			? "partial"
+			: "failed"
+		: conflicts.length
+			? "partial"
+			: "stored"
+	return {
+		status,
+		stored,
+		duplicates: conflicts.length,
+		conflicts,
+		failed,
+		previouslyStored: [],
+		sourceTracked,
+		...(sourceError ? { sourceError } : {}),
+	}
+}
+
+function alreadyExtractedResult(args: {
+	agent: CompanyBrainAgent
+	scope: string
+	source: ActionItemSource
+	sourceRef: string | null
+	sourceKey: string
+	sourceKind: ActionItemSourceKind
+	sourceRow: ActionItemSourceRow
+	extraWarnings?: ReadonlyArray<string>
+}) {
+	const previouslyStored = listStoredActionItemsForSource(
+		args.agent,
+		args.scope,
+		args.sourceKey,
+	)
+	return {
+		stored: [],
+		duplicates: args.sourceRow.item_count,
+		unresolvedOwners: [],
+		ambiguousOwners: [],
+		rejected: [],
+		warnings: [
+			`This source was already extracted (${args.sourceRow.item_count} item(s) in the ledger). Nothing new was stored.`,
+			...(args.extraWarnings ?? []),
+		],
+		alreadyExtracted: true,
+		previouslyStored,
+		scope: args.scope,
+		source: args.source,
+		sourceRef: args.sourceRef,
+		sourceKey: args.sourceKey,
+		sourceKind: args.sourceKind,
+	}
+}
+
 export type ActionItemToolsArgs = {
 	deps: TurnDeps
 	agent: CompanyBrainAgent
@@ -483,6 +1199,9 @@ export type ActionItemToolsArgs = {
 	directory: SlackMemberDirectoryCache
 	traceId: string
 	allowWrites: boolean
+	channelId?: string
+	turnTs?: string
+	askerSlackUserId?: string
 }
 
 type UnresolvedOwner = { title: string; rawName: string }
@@ -538,7 +1257,17 @@ function formatActionItem(item: BrainActionItem) {
 }
 
 export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
-	const { deps, agent, surface, directory, traceId, allowWrites } = args
+	const {
+		deps,
+		agent,
+		surface,
+		directory,
+		traceId,
+		allowWrites,
+		channelId,
+		turnTs,
+		askerSlackUserId,
+	} = args
 	const ownerSchema = deps.z.object({
 		name: deps.z
 			.string()
@@ -553,7 +1282,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 	const tools: ToolSet = {
 		list_action_items: deps.tool({
 			description:
-				"List stored action items with their real status from the action-item ledger. Visibility is decided by the current Slack surface: in a public channel you see only items stored from public channels; in a private channel you see that channel's private items plus public items; in a DM you see every item in the org. When the surface is unknown, only items with unknown scope are visible. The returned status is stored and authoritative — never call it 'likely'. Use the total and statusCounts to summarize; use status/owner/source/limit to narrow.",
+				"List stored action items with their real status from the action-item ledger. Visibility is decided by the current Slack surface: in a public channel you see only items stored from public channels; in a private channel you see that channel's private items plus public items. In a DM you see only items owned by you, DM items you captured, and public items; private-channel items appear in a DM only when you own them, and legacy items with no creator are not shown in DMs. When the surface is unknown, only items with unknown scope are visible. The returned status is stored and authoritative — never call it 'likely'. Use the total and statusCounts to summarize; use status/owner/source/limit to narrow.",
 			inputSchema: deps.z.object({
 				status: deps.z
 					.enum(ACTION_ITEM_STATUSES)
@@ -587,12 +1316,17 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 				if (source && !isValidActionItemSource(source)) {
 					return { error: `Unknown action-item source "${source}".` }
 				}
-				const result = listActionItems(agent, surface, {
-					status,
-					owner: input.owner,
-					source,
-					limit: input.limit,
-				})
+				const result = listActionItems(
+					agent,
+					surface,
+					{
+						status,
+						owner: input.owner,
+						source,
+						limit: input.limit,
+					},
+					askerSlackUserId,
+				)
 				console.log(
 					`[company-brain][${traceId}] list_action_items surface=${surface.kind} status=${status ?? "any"} owner=${input.owner ?? "any"} returned=${result.returned} total=${result.total} ms=${Date.now() - startedAt}`,
 				)
@@ -616,7 +1350,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 
 	tools.extract_action_items = deps.tool({
 		description:
-			"Store commitments extracted from a meeting transcript, pasted meeting notes, or Slack messages in the durable action-item ledger. Deduplicates by normalised title + owner + source_ref, so re-extracting the same transcript is safe and reports how many rows were skipped. Resolves owners against the Slack directory (one directory fetch per turn, shared with resolve_slack_members). Unresolved and ambiguous owners are returned explicitly — report them to the user, never invent an owner, and ask in the thread when a name is ambiguous. Call once per transcript with every item, up to 50. Not available in passive investigations, scheduled runs, or read-only turns.",
+			"Store commitments extracted from a meeting transcript, pasted meeting notes, or Slack messages in the durable action-item ledger. Extraction is idempotent per source: the first extraction from a Slack message, file, or current turn is recorded, and re-extracting the same source stores nothing and reports the items already stored. The runtime derives the source identity from source_ref: a Slack message ts becomes slack:<channel>:<ts>, a Slack file id becomes file:<id>, and any unrecognized value falls back to the current turn's message ts. A batch that substantially overlaps an existing extraction in the same scope is also treated as a duplicate. Resolves owners against the Slack directory (one directory fetch per turn, shared with resolve_slack_members). Unresolved and ambiguous owners are returned explicitly — report them to the user, never invent an owner, and ask in the thread when a name is ambiguous. Call once per transcript with every item, up to 50. Not available in passive investigations, scheduled runs, or read-only turns.",
 		inputSchema: deps.z.object({
 			items: deps.z
 				.array(
@@ -651,7 +1385,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 				.string()
 				.optional()
 				.describe(
-					"Stable reference for the source, e.g. the transcript file name/id or thread reference. Reuse the same value when re-extracting the same transcript so dedupe works.",
+					"For a transcript that arrived earlier in the conversation, the exact Slack message ts shown in the context (e.g. 1762345678.123456). For a Slack file, its file id (F...). Omit for the current message or an attachment; the runtime then uses the current turn's message ts. Do not paraphrase this value: only a real ts or file id is an identity.",
 				),
 			scope: deps.z
 				.string()
@@ -729,6 +1463,59 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 				})
 			}
 
+			const sourceRef = input.source_ref?.trim() || null
+			let sourceIdentity = resolveActionItemSourceIdentity({
+				sourceRef,
+				channelId,
+				turnTs,
+			})
+			const sourceWarnings: string[] = []
+			if (sourceIdentity?.warning) sourceWarnings.push(sourceIdentity.warning)
+
+			// Cheap early exit before resolving owners or hashing titles. The
+			// authoritative source check is repeated inside the synchronous
+			// store block below.
+			if (sourceIdentity) {
+				const existing = lookupActionItemSource(
+					agent,
+					scope,
+					sourceIdentity.sourceKey,
+				)
+				if (existing) {
+					return alreadyExtractedResult({
+						agent,
+						scope,
+						source: input.source,
+						sourceRef,
+						sourceKey: sourceIdentity.sourceKey,
+						sourceKind: sourceIdentity.kind,
+						sourceRow: existing,
+						extraWarnings: sourceWarnings,
+					})
+				}
+			}
+
+			if (!prepared.length) {
+				return {
+					stored: [],
+					duplicates: 0,
+					unresolvedOwners: [],
+					ambiguousOwners: [],
+					rejected,
+					warnings: [
+						`${rejected.length} item(s) were rejected: ${rejected
+							.map((item) => `"${item.title}" (${item.reason})`)
+							.join(", ")}.`,
+					],
+					alreadyExtracted: false,
+					scope,
+					source: input.source,
+					sourceRef,
+					sourceKey: sourceIdentity?.sourceKey,
+					sourceKind: sourceIdentity?.kind,
+				}
+			}
+
 			let directoryMembers: SlackMemberDirectoryResult = {
 				ok: false,
 				error: "No owner references to resolve.",
@@ -739,19 +1526,9 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 				if (!directoryMembers.ok) directoryError = directoryMembers.error
 			}
 
-			const stored: Array<{
-				id: string
-				title: string
-				owner: string | null
-				ownerName: string | null
-				mention: string | null
-				status: ActionItemStatus
-			}> = []
 			const unresolvedOwners: UnresolvedOwner[] = []
 			const ambiguousOwners: AmbiguousOwner[] = []
-			const seenKeys = new Set<string>()
-			let duplicates = 0
-
+			const resolved: Array<Omit<StoreActionItemBatchItem, "dedupeKey">> = []
 			for (const item of prepared) {
 				let ownerId: string | null = null
 				let ownerName: string | null = null
@@ -767,15 +1544,19 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 					if (resolution.status === "resolved") {
 						ownerId = resolution.member.id
 						ownerName =
-							item.owner.rawName ||
-							resolution.member.displayName ||
-							resolution.member.name
+							resolution.matchedBy === "id"
+								? (resolution.member.displayName ?? resolution.member.name)
+								: item.owner.rawName ||
+									resolution.member.displayName ||
+									resolution.member.name
 						ownerResolution =
-							resolution.matchedBy === "email"
-								? "email"
-								: resolution.matchedBy === "handle"
-									? "handle"
-									: "name"
+							resolution.matchedBy === "id"
+								? "id"
+								: resolution.matchedBy === "email"
+									? "email"
+									: resolution.matchedBy === "handle"
+										? "handle"
+										: "name"
 					} else if (resolution.status === "ambiguous") {
 						ownerName = item.owner.rawName
 						ownerResolution = "ambiguous"
@@ -794,51 +1575,67 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 					}
 				}
 
-				const dedupeKey = await buildActionItemDedupeKey({
-					scope,
-					title: item.title,
-					ownerId,
-					ownerName,
-				})
-				if (seenKeys.has(dedupeKey)) {
-					duplicates += 1
-					continue
-				}
-				seenKeys.add(dedupeKey)
-				const insert = insertActionItem(agent, {
+				resolved.push({
 					title: item.title,
 					detail: item.detail,
-					owner: ownerId,
+					evidence: item.evidence,
+					due: item.due,
+					ownerId,
 					ownerName,
 					ownerResolution,
-					status: "open",
-					source: input.source,
-					sourceRef: input.source_ref?.trim() || null,
-					scope,
-					due: item.due,
-					evidence: item.evidence,
-					dedupeKey,
-				})
-				if (!insert.inserted) {
-					duplicates += 1
-					continue
-				}
-				stored.push({
-					id: insert.id,
-					title: item.title,
-					owner: ownerId,
-					ownerName,
-					mention: ownerId ? `<@${ownerId}>` : null,
-					status: "open",
 				})
 			}
 
-			const warnings: string[] = []
+			if (!sourceIdentity) {
+				sourceIdentity = {
+					sourceKey: await buildTitleFallbackSourceKey({
+						scope,
+						items: resolved.map((item) => ({
+							title: item.title,
+							ownerId: item.ownerId,
+							ownerName: item.ownerName,
+						})),
+					}),
+					kind: "title_fallback",
+					warning: TITLE_FALLBACK_SOURCE_WARNING,
+				}
+				sourceWarnings.push(TITLE_FALLBACK_SOURCE_WARNING)
+			}
+
+			// Slack-identified sources get a source-scoped row key, not a
+			// title-based one: the source table is the idempotence gate.
+			const resolvedItems: StoreActionItemBatchItem[] = await Promise.all(
+				resolved.map(async (item, index) => ({
+					...item,
+					dedupeKey:
+						sourceIdentity.kind === "title_fallback"
+							? await buildActionItemDedupeKey({
+									scope,
+									title: item.title,
+									ownerId: item.ownerId,
+									ownerName: item.ownerName,
+								})
+							: await buildActionItemRowKey(sourceIdentity.sourceKey, index),
+				})),
+			)
+
+			// Synchronous block: source SELECT, item inserts, and source INSERT
+			// must not yield to another DO event.
+			const storeResult = storeActionItemBatch(agent, {
+				scope,
+				sourceKey: sourceIdentity.sourceKey,
+				source: input.source,
+				sourceRef,
+				createdBy: askerSlackUserId?.trim() || null,
+				items: resolvedItems,
+			})
+
+			const warnings: string[] = [...sourceWarnings]
 			if (unresolvedOwners.length) {
 				warnings.push(
 					`UNRESOLVED OWNERS (${unresolvedOwners.length}): ${unresolvedOwners
 						.map((owner) => `"${owner.rawName}" for "${owner.title}"`)
-						.join(", ")}. These items were stored unassigned. Do not invent an owner; name them as unassigned and ask who should own them.`,
+						.join(", ")}. These items are unassigned. Do not invent an owner; name them as unassigned and ask who should own them.`,
 				)
 			}
 			if (ambiguousOwners.length) {
@@ -853,9 +1650,35 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 						.join(", ")}. Do not choose one; ask in the thread which person is meant.`,
 				)
 			}
-			if (duplicates > 0) {
+			if (storeResult.status === "already_extracted") {
 				warnings.push(
-					`${duplicates} item(s) were already stored from this source and were skipped as duplicates.`,
+					"This source was already extracted. Nothing new was stored.",
+				)
+			}
+			if (storeResult.status === "similar_batch") {
+				const matchedSource = storeResult.matchedSource
+				const matchedCount = storeResult.matchedItems?.length ?? 0
+				warnings.push(
+					`SIMILAR BATCH: this batch substantially matches previously extracted source ${matchedSource?.sourceKey ?? "unknown"} (${matchedCount}/${resolvedItems.length} items with Jaccard >= ${ACTION_ITEM_SIMILARITY_THRESHOLD}). Nothing new was stored.`,
+				)
+			}
+			if (storeResult.failed.length) {
+				warnings.push(
+					`FAILED INSERTS (${storeResult.failed.length}): ${storeResult.failed
+						.map((item) => `"${item.title}" (${item.reason})`)
+						.join(", ")}. These items were not stored. The source was not marked as extracted; retry after fixing the failure.`,
+				)
+			}
+			if (storeResult.conflicts.length) {
+				warnings.push(
+					`ALREADY STORED ELSEWHERE (${storeResult.conflicts.length}): ${storeResult.conflicts
+						.map((item) => `"${item.title}" (${item.existingId})`)
+						.join(", ")}. These items already existed with the same dedupe key and were not inserted again.`,
+				)
+			}
+			if (storeResult.sourceError) {
+				warnings.push(
+					`Items were stored but the source record could not be written: ${storeResult.sourceError}. A retry may duplicate them.`,
 				)
 			}
 			if (rejected.length) {
@@ -867,22 +1690,40 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 			}
 			if (directoryError) {
 				warnings.push(
-					`Slack directory lookup failed: ${directoryError} All owners are stored unresolved.`,
+					`Slack directory lookup failed: ${directoryError} All owners are unresolved.`,
 				)
 			}
+			const alreadyExtracted =
+				storeResult.status === "already_extracted" ||
+				storeResult.status === "similar_batch"
 			console.log(
-				`[company-brain][${traceId}] extract_action_items source=${input.source} scope=${scope} stored=${stored.length} duplicates=${duplicates} unresolved=${unresolvedOwners.length} ambiguous=${ambiguousOwners.length} rejected=${rejected.length} ms=${Date.now() - startedAt}`,
+				`[company-brain][${traceId}] extract_action_items source=${input.source} scope=${scope} sourceKind=${sourceIdentity.kind} status=${storeResult.status} stored=${storeResult.stored.length} duplicates=${storeResult.duplicates} unresolved=${unresolvedOwners.length} ambiguous=${ambiguousOwners.length} rejected=${rejected.length} ms=${Date.now() - startedAt}`,
 			)
 			return {
-				stored,
-				duplicates,
+				stored: storeResult.stored,
+				duplicates: storeResult.duplicates,
 				unresolvedOwners,
 				ambiguousOwners,
 				rejected,
 				warnings,
+				alreadyExtracted,
+				previouslyStored: storeResult.previouslyStored,
 				scope,
 				source: input.source,
-				sourceRef: input.source_ref?.trim() || null,
+				sourceRef,
+				sourceKey: sourceIdentity.sourceKey,
+				sourceKind: sourceIdentity.kind,
+				sourceTracked: storeResult.sourceTracked,
+				...(storeResult.matchedSource
+					? { matchedSource: storeResult.matchedSource }
+					: {}),
+				...(storeResult.matchedItems
+					? { matchedItems: storeResult.matchedItems }
+					: {}),
+				...(storeResult.conflicts.length
+					? { conflicts: storeResult.conflicts }
+					: {}),
+				...(storeResult.failed.length ? { failed: storeResult.failed } : {}),
 				...(directoryError ? { directoryError } : {}),
 			}
 		},

@@ -270,6 +270,7 @@ export async function computeTurn(
 		mentionedSlackUserIds,
 		askerIsRestricted: asker?.isRestricted,
 		scheduledRun,
+		turnTs: input.slackTurnTs,
 		options,
 		progress: pacingProgress,
 		traceId,

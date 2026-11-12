@@ -125,6 +125,8 @@ describe("formatDmHistoryConversation", () => {
 		expect(text.indexOf("past question")).toBeLessThan(
 			text.indexOf("bot answer"),
 		)
+		expect(text).toContain("(ts=1)")
+		expect(text).toContain("(ts=2)")
 		expect(formatted.some((entry) => entry.role === "assistant")).toBe(true)
 	})
 
@@ -192,6 +194,7 @@ describe("shouldLoadDmHistory / loadDmHistoryConversation", () => {
 		const fetchMessages = vi.fn(async () => [])
 		await loadDmHistoryConversation({ ...base, fetchMessages })
 		expect(fetchMessages).toHaveBeenCalledTimes(1)
+		expect(fetchMessages).toHaveBeenCalledWith("xoxb-test", "D1", "3")
 		await loadDmHistoryConversation({
 			...base,
 			isDm: false,

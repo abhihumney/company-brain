@@ -58,7 +58,10 @@ import {
 } from "../slack/reaction-queue"
 import { ensureTriageTraceSamplingTable } from "../slack/triage-sampling"
 import { ensureTurnControlTables } from "../slack/turn-control"
-import { ensureActionItemTable } from "./action-items"
+import {
+	ensureActionItemSourceTable,
+	ensureActionItemTable,
+} from "./action-items"
 import { brainAgent, type CompanyBrainAgent } from "./agent"
 import { ensureApprovalTables } from "./approval"
 import {
@@ -157,6 +160,7 @@ export async function onStart(agent: CompanyBrainAgent): Promise<void> {
 	ensureBrainMemoryStateTable(agent)
 	ensureApprovalTables(agent)
 	ensureActionItemTable(agent)
+	ensureActionItemSourceTable(agent)
 	ensureLeaseTables(agent)
 	ensureChimeBudgetTables(agent)
 	ensureSlackEventStoreTables(agent)

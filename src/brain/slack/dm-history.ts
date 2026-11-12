@@ -159,9 +159,14 @@ export type DmHistoryFormatOptions = {
 	selection?: Omit<DmHistorySelectionOptions, "excludeTs">
 }
 
+function messagePrefix(label: string, ts: string | undefined): string {
+	return `[Slack message from ${label}${ts ? ` (ts=${ts})` : ""}]`
+}
+
 /**
  * Pure formatter: raw DM messages in, the ModelMessage[] shape computeTurn
- * expects out. It includes the bot's own replies and labels every speaker.
+ * expects out. It includes the bot's own replies and labels every speaker with
+ * the message ts so the model can cite an earlier transcript exactly.
  */
 export function formatDmHistoryConversation(
 	messages: ReadonlyArray<SlackThreadMessage>,
@@ -176,7 +181,10 @@ export function formatDmHistoryConversation(
 		const body = messageBody(message, message.text ?? "")
 		if (!body || /^new assistant thread$/i.test(body)) continue
 		if (isOurBot(message, opts.botUserId, opts.slackBotId)) {
-			formatted.push({ role: "assistant", content: body })
+			formatted.push({
+				role: "assistant",
+				content: `${messagePrefix("Company Brain", message.ts)}\n${body}`,
+			})
 			continue
 		}
 		const name = message.user ? opts.userNames?.get(message.user) : undefined
@@ -187,7 +195,7 @@ export function formatDmHistoryConversation(
 				: "an unidentified teammate"
 		formatted.push({
 			role: "user",
-			content: `[Slack message from ${label}]\n${body}`,
+			content: `${messagePrefix(label, message.ts)}\n${body}`,
 		})
 	}
 	return mergeConsecutiveMessages(formatted)
@@ -213,12 +221,14 @@ function mergeConsecutiveMessages(messages: ModelMessage[]): ModelMessage[] {
 export type DmHistoryFetcher = (
 	botToken: string,
 	channel: string,
+	latestTs: string,
 ) => Promise<SlackThreadMessage[]>
 
 /** One conversations.history page, newest six, no pagination. Soft-fails empty. */
 export async function fetchDmHistoryMessages(
 	botToken: string,
 	channel: string,
+	latestTs: string,
 ): Promise<SlackThreadMessage[]> {
 	try {
 		// Loaded lazily so pure formatter tests never pull in the Slack client.
@@ -227,6 +237,7 @@ export async function fetchDmHistoryMessages(
 			limit: MAX_DM_HISTORY_MESSAGES + 1,
 			maxMessages: MAX_DM_HISTORY_MESSAGES + 1,
 			maxPages: 1,
+			...(latestTs ? { latest: latestTs } : {}),
 		})
 		if (!result.ok) {
 			console.warn(
@@ -275,6 +286,7 @@ export async function loadDmHistoryConversation(
 		const messages = await (args.fetchMessages ?? fetchDmHistoryMessages)(
 			args.botToken,
 			args.channel,
+			args.currentTs,
 		)
 		return formatDmHistoryConversation(messages, {
 			excludeTs: args.currentTs,

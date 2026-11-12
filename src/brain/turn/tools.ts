@@ -87,6 +87,8 @@ export type AssembleTurnToolsArgs = {
 	mentionedSlackUserIds?: string[]
 	askerIsRestricted?: boolean
 	scheduledRun?: boolean
+	/** The current Slack message ts, used as the fallback action-item source. */
+	turnTs?: string
 	options?: ComputeTurnOptions
 	/** Live progress sink; enables the deliberate post_update narration tool. */
 	progress?: TurnProgress
@@ -121,6 +123,7 @@ export type TurnToolAssemblySnapshot = {
 	mentionedSlackUserIds?: string[]
 	askerIsRestricted?: boolean
 	scheduledRun?: boolean
+	turnTs?: string
 	enabledFamilies: LazyToolFamily[]
 }
 
@@ -134,6 +137,7 @@ export function snapshotTurnToolAssembly(
 		| "mentionedSlackUserIds"
 		| "askerIsRestricted"
 		| "scheduledRun"
+		| "turnTs"
 	>,
 	enabledFamilies: LazyToolFamily[],
 ): TurnToolAssemblySnapshot {
@@ -174,6 +178,7 @@ export function snapshotTurnToolAssembly(
 			: undefined,
 		askerIsRestricted: args.askerIsRestricted,
 		scheduledRun: args.scheduledRun,
+		turnTs: args.turnTs,
 		enabledFamilies: [...enabledFamilies],
 	}
 }
@@ -190,6 +195,7 @@ export function restoreTurnToolAssembly(
 	| "mentionedSlackUserIds"
 	| "askerIsRestricted"
 	| "scheduledRun"
+	| "turnTs"
 	| "initialEnabledFamilies"
 > {
 	return {
@@ -221,6 +227,7 @@ export function restoreTurnToolAssembly(
 			: undefined,
 		askerIsRestricted: snapshot.askerIsRestricted,
 		scheduledRun: snapshot.scheduledRun,
+		turnTs: snapshot.turnTs,
 		initialEnabledFamilies: [...snapshot.enabledFamilies],
 	}
 }
@@ -255,6 +262,7 @@ export async function assembleTurnTools(
 		mentionedSlackUserIds,
 		askerIsRestricted,
 		scheduledRun,
+		turnTs,
 		traceId,
 		capture,
 	} = args
@@ -428,6 +436,9 @@ export async function assembleTurnTools(
 			directory: slackMemberDirectory,
 			traceId,
 			allowWrites,
+			channelId: slackLookup?.channel,
+			turnTs,
+			askerSlackUserId,
 		}),
 	)
 	Object.assign(

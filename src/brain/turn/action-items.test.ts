@@ -3,47 +3,153 @@ import { describe, expect, it } from "vitest"
 import { z } from "zod"
 import type { CompanyBrainAgent } from "./agent"
 import {
+	ACTION_ITEM_SIMILARITY_THRESHOLD,
 	actionItemDedupePayload,
 	actionItemScopeForSurface,
 	actionItemSurfaceForSlackLookup,
+	actionItemTitleSimilarity,
 	buildActionItemDedupeKey,
+	buildActionItemRowKey,
+	buildTitleFallbackSourceKey,
 	canStoreActionItemScope,
 	createActionItemTools,
 	describeActionItemSurface,
 	insertActionItem,
 	isActionItemVisibleOnSurface,
+	isActionItemVisibleToAsker,
 	isValidActionItemScope,
 	isValidActionItemSource,
 	isValidActionItemStatus,
+	matchActionItemBatch,
 	normalizeActionItemDue,
 	normalizeActionItemOwnerFilter,
 	normalizeActionItemTitle,
+	resolveActionItemSourceIdentity,
 	type ActionItemSource,
 	type ActionItemStatus,
 	type ActionItemSurface,
 } from "./action-items"
 import type { TurnDeps } from "./deps"
 import type { SlackMember } from "../slack/client"
+import { buildSystemPrompt } from "../prompt/system"
 
 type FakeRow = Record<string, unknown>
+type FakeSourceRow = {
+	scope: string
+	source_key: string
+	item_count: number
+	created_at: number
+}
 
-function createFakeActionItemAgent(): {
+function createFakeActionItemAgent(options: { failItemInsert?: boolean } = {}): {
 	agent: CompanyBrainAgent
 	rows: FakeRow[]
+	sources: FakeSourceRow[]
 } {
 	const rows: FakeRow[] = []
+	const sources: FakeSourceRow[] = []
 	const sql = (
 		strings: TemplateStringsArray,
 		...values: unknown[]
 	): unknown[] => {
 		const text = strings.join("?")
+		if (/PRAGMA table_info/i.test(text)) {
+			return [
+				"id",
+				"title",
+				"detail",
+				"owner",
+				"owner_name",
+				"owner_resolution",
+				"status",
+				"source",
+				"source_ref",
+				"source_key",
+				"scope",
+				"due",
+				"evidence",
+				"created_by",
+				"dedupe_key",
+				"created_at",
+				"updated_at",
+			].map((name) => ({ name }))
+		}
 		if (/CREATE TABLE|CREATE INDEX/i.test(text)) return []
+		if (
+			/SELECT scope, source_key, item_count, created_at/i.test(text) &&
+			/FROM brain_action_item_source/i.test(text)
+		) {
+			return sources.filter(
+				(source) =>
+					source.scope === values[0] && source.source_key === values[1],
+			)
+		}
+		if (/SELECT\s+s\.source_key, s\.item_count/i.test(text)) {
+			const scope = values[0]
+			const out: Array<Record<string, unknown>> = []
+			for (const source of sources.filter((entry) => entry.scope === scope)) {
+				const items = rows.filter(
+					(row) =>
+						row.scope === source.scope && row.source_key === source.source_key,
+				)
+				if (!items.length) {
+					out.push({
+						source_key: source.source_key,
+						item_count: source.item_count,
+						created_at: source.created_at,
+						id: null,
+						title: null,
+						owner: null,
+						owner_name: null,
+					})
+					continue
+				}
+				for (const item of items) {
+					out.push({
+						source_key: source.source_key,
+						item_count: source.item_count,
+						created_at: source.created_at,
+						id: item.id,
+						title: item.title,
+						owner: item.owner,
+						owner_name: item.owner_name,
+					})
+				}
+			}
+			return out
+		}
+		if (/SELECT id, title FROM brain_action_item/i.test(text)) {
+			return rows
+				.filter(
+					(row) => row.scope === values[0] && row.source_key === values[1],
+				)
+				.map((row) => ({ id: row.id, title: row.title }))
+		}
 		if (/SELECT id FROM brain_action_item WHERE dedupe_key/i.test(text)) {
 			return rows
 				.filter((row) => row.dedupe_key === values[0])
 				.map((row) => ({ id: row.id }))
 		}
+		if (/INSERT INTO brain_action_item_source/i.test(text)) {
+			const [scope, source_key, item_count, created_at] = values
+			if (
+				!sources.some(
+					(source) => source.scope === scope && source.source_key === source_key,
+				)
+			) {
+				sources.push({
+					scope: scope as string,
+					source_key: source_key as string,
+					item_count: item_count as number,
+					created_at: created_at as number,
+				})
+			}
+			return []
+		}
 		if (/INSERT INTO brain_action_item/i.test(text)) {
+			if (options.failItemInsert) {
+				throw new Error("simulated action-item insert failure")
+			}
 			const [
 				id,
 				title,
@@ -54,9 +160,11 @@ function createFakeActionItemAgent(): {
 				status,
 				source,
 				source_ref,
+				source_key,
 				scope,
 				due,
 				evidence,
+				created_by,
 				dedupe_key,
 				created_at,
 				updated_at,
@@ -72,9 +180,11 @@ function createFakeActionItemAgent(): {
 					status,
 					source,
 					source_ref,
+					source_key,
 					scope,
 					due,
 					evidence,
+					created_by,
 					dedupe_key,
 					created_at,
 					updated_at,
@@ -85,7 +195,44 @@ function createFakeActionItemAgent(): {
 		if (/SELECT \* FROM brain_action_item/i.test(text)) return [...rows]
 		throw new Error(`Unhandled fake SQL: ${text}`)
 	}
-	return { agent: { sql } as unknown as CompanyBrainAgent, rows }
+	return { agent: { sql } as unknown as CompanyBrainAgent, rows, sources }
+}
+
+type ExtractToolResult = {
+	stored: Array<{
+		id: string
+		title: string
+		owner: string | null
+		mention: string | null
+	}>
+	duplicates: number
+	alreadyExtracted?: boolean
+	previouslyStored?: Array<{ id: string; title: string }>
+	failed?: Array<{ title: string; reason: string }>
+	matchedSource?: { sourceKey: string }
+	warnings?: string[]
+	sourceKey?: string
+}
+
+function createExtractHarness(options: { failItemInsert?: boolean } = {}) {
+	const fake = createFakeActionItemAgent(options)
+	const tools = createActionItemTools({
+		deps: { z, tool } as unknown as TurnDeps,
+		agent: fake.agent,
+		surface: { kind: "dm" },
+		directory: {
+			load: async () => ({ ok: true as const, members: [] }),
+		},
+		traceId: "test",
+		allowWrites: true,
+		channelId: "D1",
+		turnTs: "1762345679.000001",
+		askerSlackUserId: "U-ASKER",
+	})
+	const extract = tools.extract_action_items as unknown as {
+		execute(input: unknown): Promise<ExtractToolResult>
+	}
+	return { ...fake, extract }
 }
 
 describe("normalizeActionItemTitle", () => {
@@ -143,6 +290,16 @@ describe("dedupe", () => {
 			})
 		expect(payload("dm")).not.toBe(payload("public:C1"))
 		expect(payload("public:C1")).not.toBe(payload("private:C1"))
+	})
+
+	it("builds source-scoped row keys independent of item text", async () => {
+		const first = await buildActionItemRowKey("slack:C1:1.000001", 0)
+		const same = await buildActionItemRowKey("slack:C1:1.000001", 0)
+		const nextItem = await buildActionItemRowKey("slack:C1:1.000001", 1)
+		const otherSource = await buildActionItemRowKey("slack:C1:1.000002", 0)
+		expect(first).toBe(same)
+		expect(first).not.toBe(nextItem)
+		expect(first).not.toBe(otherSource)
 	})
 })
 
@@ -282,12 +439,19 @@ describe("surface derivation", () => {
 				memoryScope: { kind: "shared", channelId: "C2" },
 			}),
 		).toEqual({ kind: "public_channel", channelId: "C2" })
+		expect(
+			actionItemSurfaceForSlackLookup({
+				channel: "C1",
+				memoryScope: { kind: "shared", channelId: "C1" },
+			}),
+		).toEqual({ kind: "public_channel", channelId: "C1" })
+		// Without an explicit memory scope, privacy cannot be guessed from the
+		// channel id prefix: C channels can be private and D is not enough.
 		expect(actionItemSurfaceForSlackLookup({ channel: "D9" })).toEqual({
-			kind: "dm",
+			kind: "unknown",
 		})
 		expect(actionItemSurfaceForSlackLookup({ channel: "C9" })).toEqual({
-			kind: "public_channel",
-			channelId: "C9",
+			kind: "unknown",
 		})
 		expect(actionItemSurfaceForSlackLookup(undefined)).toEqual({
 			kind: "unknown",
@@ -307,11 +471,323 @@ describe("surface derivation", () => {
 
 	it("describes the surface for the model", () => {
 		expect(describeActionItemSurface({ kind: "dm" })).toContain(
-			"all org action items",
+			"your own items",
 		)
 		expect(
 			describeActionItemSurface({ kind: "public_channel", channelId: "C1" }),
 		).toContain("only public items")
+	})
+})
+
+describe("source identity", () => {
+	const ts = "1762345678.123456"
+
+	it("uses a Slack message ts with the channel", () => {
+		expect(
+			resolveActionItemSourceIdentity({
+				sourceRef: ts,
+				channelId: "C1",
+				turnTs: "1762345679.000001",
+			}),
+		).toEqual({ sourceKey: `slack:C1:${ts}`, kind: "slack_message" })
+	})
+
+	it("uses a Slack file id", () => {
+		expect(
+			resolveActionItemSourceIdentity({
+				sourceRef: "F0123ABCD",
+				channelId: "C1",
+			}),
+		).toEqual({ sourceKey: "file:F0123ABCD", kind: "slack_file" })
+	})
+
+	it("falls back to the current turn ts and ignores a model-written source_ref", () => {
+		const identity = resolveActionItemSourceIdentity({
+			sourceRef: "RBK test - Q4 launch sync (synthetic transcript)",
+			channelId: "C1",
+			turnTs: "1762345679.000001",
+		})
+		expect(identity).toEqual({
+			sourceKey: "slack:C1:1762345679.000001",
+			kind: "turn_message",
+			warning:
+				"source_ref was not a Slack message ts or file id, so the current turn's message ts was used as the source identity.",
+		})
+	})
+
+	it("returns no source identity for a non-Slack turn", () => {
+		expect(
+			resolveActionItemSourceIdentity({ sourceRef: "some transcript" }),
+		).toBeUndefined()
+		expect(
+			resolveActionItemSourceIdentity({
+				sourceRef: ts,
+				channelId: undefined,
+				turnTs: undefined,
+			}),
+		).toBeUndefined()
+	})
+
+	it("builds a stable title fallback for non-Slack turns", async () => {
+		const first = await buildTitleFallbackSourceKey({
+			scope: "dm",
+			items: [
+				{ title: "Send the deck", ownerId: "U1" },
+				{ title: "Book the offsite", ownerId: "U2" },
+			],
+		})
+		const reordered = await buildTitleFallbackSourceKey({
+			scope: "dm",
+			items: [
+				{ title: "Book the offsite", ownerId: "U2" },
+				{ title: "Send the deck", ownerId: "U1" },
+			],
+		})
+		const different = await buildTitleFallbackSourceKey({
+			scope: "dm",
+			items: [{ title: "Send the deck", ownerId: "U1" }],
+		})
+		expect(first).toBe(reordered)
+		expect(first).not.toBe(different)
+		expect(first.startsWith("title:")).toBe(true)
+	})
+})
+
+describe("batch similarity safety net", () => {
+	const pass1 = [
+		"Finalize and circulate the Q1 budget draft to finance",
+		"Send vendor spend numbers",
+		"Update the travel policy",
+	]
+	const pass2 = [
+		"Circulate the Q1 budget draft to finance",
+		"Pull vendor spend numbers and send to Abhishek",
+		"Update the travel policy before month end",
+		"Get Q1 budget signed off",
+	]
+
+	it("matches each paraphrase pair at or above the 0.6 similarity threshold", () => {
+		for (let index = 0; index < pass1.length; index++) {
+			const similarity = actionItemTitleSimilarity(
+				pass2[index] ?? "",
+				pass1[index] ?? "",
+			)
+			expect(similarity).toBeGreaterThanOrEqual(
+				ACTION_ITEM_SIMILARITY_THRESHOLD,
+			)
+		}
+	})
+
+	it("treats the four-item paraphrase batch as the same extraction", () => {
+		const match = matchActionItemBatch(
+			pass2.map((title) => ({ title, ownerKey: "id:u1" })),
+			pass1.map((title) => ({ title, ownerKey: "id:u1" })),
+		)
+		expect(match.matched).toBe(true)
+		expect(match.matchedCount).toBe(3)
+		expect(match.ratio).toBe(0.75)
+	})
+
+	it("does not merge a weak small batch", () => {
+		const match = matchActionItemBatch(
+			[{ title: "Get Q1 budget signed off", ownerKey: "id:u1" }],
+			pass1.map((title) => ({ title, ownerKey: "id:u1" })),
+		)
+		expect(match.matched).toBe(false)
+	})
+
+	it("requires the same owner key", () => {
+		const match = matchActionItemBatch(
+			[{ title: pass2[0] ?? "", ownerKey: "id:u2" }],
+			pass1.map((title) => ({ title, ownerKey: "id:u1" })),
+		)
+		expect(match.matched).toBe(false)
+	})
+})
+
+describe("DM visibility", () => {
+	const dm: ActionItemSurface = { kind: "dm" }
+	const asker = "U-ASKER"
+
+	it("shows items owned by the asker, DM items they captured, and public items", () => {
+		expect(
+			isActionItemVisibleToAsker(
+				{ owner: asker, scope: "private:C2", created_by: "U-OTHER" },
+				dm,
+				asker,
+			),
+		).toBe(true)
+		expect(
+			isActionItemVisibleToAsker(
+				{ owner: null, scope: "dm", created_by: asker },
+				dm,
+				asker,
+			),
+		).toBe(true)
+		expect(
+			isActionItemVisibleToAsker(
+				{ owner: null, scope: "public:C1", created_by: null },
+				dm,
+				asker,
+			),
+		).toBe(true)
+		expect(
+			isActionItemVisibleToAsker(
+				{ owner: "U-OTHER", scope: "public:C1", created_by: asker },
+				dm,
+				asker,
+			),
+		).toBe(true)
+	})
+
+	it("never shows private-channel or legacy-unowned items unless the asker owns them", () => {
+		expect(
+			isActionItemVisibleToAsker(
+				{ owner: "U-OTHER", scope: "private:C2", created_by: asker },
+				dm,
+				asker,
+			),
+		).toBe(false)
+		expect(
+			isActionItemVisibleToAsker(
+				{ owner: null, scope: "dm", created_by: null },
+				dm,
+				asker,
+			),
+		).toBe(false)
+		expect(
+			isActionItemVisibleToAsker(
+				{ owner: null, scope: "unknown", created_by: asker },
+				dm,
+				asker,
+			),
+		).toBe(false)
+	})
+
+	it("leaves public and private channel rules unchanged", () => {
+		const publicC1: ActionItemSurface = {
+			kind: "public_channel",
+			channelId: "C1",
+		}
+		const privateC1: ActionItemSurface = {
+			kind: "private_channel",
+			channelId: "C1",
+		}
+		expect(
+			isActionItemVisibleToAsker(
+				{ owner: null, scope: "public:C9", created_by: null },
+				publicC1,
+				asker,
+			),
+		).toBe(true)
+		expect(
+			isActionItemVisibleToAsker(
+				{ owner: null, scope: "private:C1", created_by: null },
+				publicC1,
+				asker,
+			),
+		).toBe(false)
+		expect(
+			isActionItemVisibleToAsker(
+				{ owner: null, scope: "private:C1", created_by: null },
+				privateC1,
+				asker,
+			),
+		).toBe(true)
+		expect(
+			isActionItemVisibleToAsker(
+				{ owner: null, scope: "public:C9", created_by: null },
+				privateC1,
+				asker,
+			),
+		).toBe(true)
+	})
+
+	it("filters the DM ledger by asker in list_action_items", async () => {
+		const fake = createFakeActionItemAgent()
+		const base = {
+			detail: null,
+			owner: null,
+			owner_name: null,
+			owner_resolution: null,
+			status: "open",
+			source: "manual",
+			source_ref: null,
+			source_key: null,
+			scope: "dm",
+			due: null,
+			evidence: null,
+			created_by: null,
+			created_at: 1000,
+			updated_at: 1000,
+		}
+		fake.rows.push(
+			{
+				...base,
+				id: "owned",
+				title: "Owned private item",
+				owner: asker,
+				scope: "private:C9",
+				dedupe_key: "owned",
+			},
+			{
+				...base,
+				id: "captured",
+				title: "Captured DM item",
+				created_by: asker,
+				dedupe_key: "captured",
+			},
+			{
+				...base,
+				id: "public",
+				title: "Public item",
+				scope: "public:C1",
+				dedupe_key: "public",
+			},
+			{
+				...base,
+				id: "private-other",
+				title: "Private item owned by someone else",
+				owner: "U-OTHER",
+				scope: "private:C2",
+				created_by: asker,
+				dedupe_key: "private-other",
+			},
+			{
+				...base,
+				id: "legacy",
+				title: "Legacy DM item",
+				dedupe_key: "legacy",
+			},
+			{
+				...base,
+				id: "unknown",
+				title: "Unknown-scope item",
+				scope: "unknown",
+				created_by: asker,
+				dedupe_key: "unknown",
+			},
+		)
+		const tools = createActionItemTools({
+			deps: { z, tool } as unknown as TurnDeps,
+			agent: fake.agent,
+			surface: { kind: "dm" },
+			directory: {
+				load: async () => ({ ok: true as const, members: [] }),
+			},
+			traceId: "test",
+			allowWrites: false,
+			askerSlackUserId: asker,
+		})
+		const list = tools.list_action_items as unknown as {
+			execute(input: unknown): Promise<{ items: Array<{ id: string }> }>
+		}
+		const result = await list.execute({})
+		expect(result.items.map((item) => item.id).sort()).toEqual([
+			"captured",
+			"owned",
+			"public",
+		])
 	})
 })
 
@@ -462,5 +938,140 @@ describe("extract dedupe across source_ref variants", () => {
 		expect(second.stored).toHaveLength(0)
 		expect(second.duplicates).toBe(4)
 		expect(rows).toHaveLength(4)
+	})
+})
+
+describe("source-level idempotence", () => {
+	it("stores once per Slack source ts and reports the existing items on retry", async () => {
+		const { extract, rows } = createExtractHarness()
+		const items = [
+			{ title: "Send the deck" },
+			{ title: "Book the offsite" },
+		]
+		const sourceRef = "1762345678.123456"
+
+		const first = await extract.execute({
+			items,
+			source: "meeting",
+			source_ref: sourceRef,
+		})
+		expect(first.stored).toHaveLength(2)
+		expect(first.duplicates).toBe(0)
+		expect(first.alreadyExtracted).toBe(false)
+		expect(first.sourceKey).toBe(`slack:D1:${sourceRef}`)
+		expect(rows).toHaveLength(2)
+		expect(rows[0]?.created_by).toBe("U-ASKER")
+		expect(rows[0]?.source_key).toBe(`slack:D1:${sourceRef}`)
+
+		const second = await extract.execute({
+			items: [
+				{ title: "Circulate the deck" },
+				{ title: "Move the offsite" },
+			],
+			source: "meeting",
+			source_ref: sourceRef,
+		})
+		expect(second.stored).toEqual([])
+		expect(second.duplicates).toBe(2)
+		expect(second.alreadyExtracted).toBe(true)
+		expect(
+			second.previouslyStored?.map((item) => item.title).sort(),
+		).toEqual(["Book the offsite", "Send the deck"])
+		expect(rows).toHaveLength(2)
+	})
+
+	it("catches a paraphrased re-extraction from a different source ts", async () => {
+		const { extract, rows } = createExtractHarness()
+		const first = await extract.execute({
+			items: [
+				{ title: "Finalize and circulate the Q1 budget draft to finance" },
+				{ title: "Send vendor spend numbers" },
+				{ title: "Update the travel policy" },
+			],
+			source: "meeting",
+			source_ref: "1762345678.111111",
+		})
+		expect(first.stored).toHaveLength(3)
+
+		const second = await extract.execute({
+			items: [
+				{ title: "Circulate the Q1 budget draft to finance" },
+				{ title: "Pull vendor spend numbers and send to Abhishek" },
+				{ title: "Update the travel policy before month end" },
+				{ title: "Get Q1 budget signed off" },
+			],
+			source: "meeting",
+			source_ref: "1762345678.222222",
+		})
+		expect(second.stored).toEqual([])
+		expect(second.alreadyExtracted).toBe(true)
+		expect(second.duplicates).toBe(3)
+		expect(second.matchedSource?.sourceKey).toBe(
+			"slack:D1:1762345678.111111",
+		)
+		expect(
+			second.warnings?.some((warning) => warning.includes("SIMILAR BATCH")),
+		).toBe(true)
+		expect(rows).toHaveLength(3)
+	})
+
+	it("does not block a weakly overlapping new source on an identical title", async () => {
+		const { extract, rows } = createExtractHarness()
+		const first = await extract.execute({
+			items: [
+				{ title: "Send the deck" },
+				{ title: "Book the offsite" },
+				{ title: "Write the runbook" },
+			],
+			source: "meeting",
+			source_ref: "1762345678.444444",
+		})
+		expect(first.stored).toHaveLength(3)
+		const second = await extract.execute({
+			items: [
+				{ title: "Send the deck" },
+				{ title: "Hire a designer" },
+				{ title: "Review pricing" },
+				{ title: "Plan offsite menu" },
+			],
+			source: "meeting",
+			source_ref: "1762345678.555555",
+		})
+		// Only 1 of 4 overlaps the earlier batch (25%), below the 60% net, so
+		// this is a new extraction even though one title is identical.
+		expect(second.stored).toHaveLength(4)
+		expect(second.alreadyExtracted).toBe(false)
+		expect(rows).toHaveLength(7)
+	})
+
+	it("surfaces a failed insert instead of reporting it as a duplicate", async () => {
+		const { extract, rows, sources } = createExtractHarness({
+			failItemInsert: true,
+		})
+		const result = await extract.execute({
+			items: [{ title: "Send the deck" }],
+			source: "meeting",
+			source_ref: "1762345678.333333",
+		})
+		expect(result.stored).toEqual([])
+		expect(result.duplicates).toBe(0)
+		expect(result.failed).toHaveLength(1)
+		expect(result.failed?.[0]?.reason).toContain(
+			"simulated action-item insert failure",
+		)
+		expect(
+			result.warnings?.some((warning) => warning.includes("FAILED INSERTS")),
+		).toBe(true)
+		expect(rows).toHaveLength(0)
+		expect(sources).toHaveLength(0)
+	})
+})
+
+describe("action-items prompt", () => {
+	it("is present even in memory-only mode and scopes mentions to other people", () => {
+		const prompt = buildSystemPrompt({ toolMode: "memory_only" })
+		expect(prompt).toContain("<action_items>")
+		expect(prompt).toContain("someone other than the asker")
+		expect(prompt).toContain('write "you" in plain text')
 	})
 })

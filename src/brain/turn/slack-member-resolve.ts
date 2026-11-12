@@ -14,6 +14,7 @@ export type SlackMemberReference = {
 }
 
 export type SlackMemberMatchKind =
+	| "id"
 	| "email"
 	| "handle"
 	| "display_name"
@@ -69,6 +70,22 @@ export function normalizeMemberEmail(value: string | undefined): string {
 function firstToken(value: string | undefined): string {
 	const normalized = normalizeMemberMatchText(value)
 	return normalized.split(" ")[0] ?? ""
+}
+
+/** Native mentions and raw Slack user ids are authoritative id references. */
+function slackIdFromReference(
+	reference: SlackMemberReference,
+): string | undefined {
+	for (const value of [reference.handle, reference.name]) {
+		const trimmed = value?.trim()
+		if (!trimmed) continue
+		const mention = trimmed.match(/^<@([A-Z0-9]+)(?:\|[^>]*)?>$/i)
+		if (mention?.[1]) return mention[1].toUpperCase()
+		if (/^[UW][A-Z0-9]{2,}$/i.test(trimmed)) {
+			return trimmed.toUpperCase()
+		}
+	}
+	return undefined
 }
 
 function memberCandidates(member: SlackMember): SlackMemberCandidate {
@@ -172,15 +189,26 @@ function resolveByName(
 }
 
 /**
- * Resolve one reference. Email is authoritative when it matches exactly;
- * otherwise handle, then name. A `name` may be a full name, first name, or a
- * prefix of either.
+ * Resolve one reference. A native mention or raw Slack user id matches by id
+ * first and is authoritative. Otherwise email is authoritative when it matches
+ * exactly; then handle, then name. A `name` may be a full name, first name, or
+ * a prefix of either.
  */
 export function resolveSlackMemberReference(
 	reference: SlackMemberReference,
 	directory: ReadonlyArray<SlackMember>,
 ): SlackMemberResolution {
 	const members = directory.filter(isUsableMember)
+
+	const slackId = slackIdFromReference(reference)
+	if (slackId) {
+		const byId = resolutionFromHits(
+			members
+				.filter((member) => member.id.toUpperCase() === slackId)
+				.map((member) => ({ member, matchedBy: "id" as const })),
+		)
+		return byId ?? { status: "unresolved" }
+	}
 
 	const email = normalizeMemberEmail(reference.email)
 	if (email) {
@@ -328,7 +356,7 @@ export function createResolveSlackMembersTool(
 	return {
 		resolve_slack_members: deps.tool({
 			description:
-				"Resolve names, handles, or emails from a transcript or message to real Slack users. Use this before assigning an action-item owner when the reference is not already a Slack mention. Returns a resolved user id and display name with how it matched (email, handle, display_name, real_name, first_name), an ambiguous result with every plausible user, or unresolved. Never invent or guess a Slack id. The member directory is fetched at most once per turn and shared with extract_action_items.",
+				"Resolve names, handles, emails, native mentions (<@U123>), or raw Slack user ids from a transcript or message to real Slack users. Use this before assigning an action-item owner when the reference is not already a Slack mention. Returns a resolved user id and display name with how it matched (id, email, handle, display_name, real_name, first_name), an ambiguous result with every plausible user, or unresolved. Never invent or guess a Slack id. The member directory is fetched at most once per turn and shared with extract_action_items.",
 			inputSchema: deps.z.object({
 				candidates: deps.z
 					.array(referenceSchema)
