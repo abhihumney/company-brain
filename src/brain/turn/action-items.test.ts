@@ -1807,6 +1807,9 @@ describe("action-items prompt", () => {
 		const prompt = buildSystemPrompt({ toolMode: "memory_only" })
 		expect(prompt).toContain("<action_items>")
 		expect(prompt).toContain("prior conversation is background")
+		expect(prompt).toContain(
+			"The current message defines the task. Earlier messages are reference material",
+		)
 		expect(prompt).toContain("we talked about X, but we didn't decide")
 		expect(prompt).toContain("missing item is cheaper")
 		expect(prompt).toContain(

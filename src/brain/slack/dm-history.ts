@@ -255,6 +255,8 @@ export async function fetchDmHistoryMessages(
 export type LoadDmHistoryArgs = {
 	isDm: boolean
 	threadTs?: string
+	/** The current user message; prior context is loaded only when it refers to it. */
+	turnText?: string
 	botToken: string
 	channel: string
 	currentTs: string
@@ -267,6 +269,25 @@ export type LoadDmHistoryArgs = {
 	fetchMessages?: DmHistoryFetcher
 }
 
+const PRIOR_CONTEXT_REFERENCE_RE =
+	/\b(?:that|those|them|the above|above|earlier|previous|before|the one i sent|last message|just sent|what about|same for|status of those|extract from)\b/i
+
+/**
+ * Whether the current message refers to earlier conversation. A fresh message
+ * must not have old pasted transcripts loaded into the model context.
+ */
+export function needsPriorContext(turnText: string | undefined): boolean {
+	if (!turnText) return false
+	const normalized = turnText
+		.normalize("NFKC")
+		.replace(/[\u2018\u2019\u02bc]/g, "'")
+		.replace(/\s+/g, " ")
+		.trim()
+		.toLowerCase()
+	if (!normalized) return false
+	return PRIOR_CONTEXT_REFERENCE_RE.test(normalized)
+}
+
 export function shouldLoadDmHistory(args: {
 	isDm: boolean
 	threadTs?: string
@@ -277,11 +298,16 @@ export function shouldLoadDmHistory(args: {
 /**
  * Gate + fetch + format. Only top-level DMs get the extra call; threaded
  * replies already carry complete thread history and must not double it.
+ * Prior context is also skipped when the current message is not referential.
  */
 export async function loadDmHistoryConversation(
 	args: LoadDmHistoryArgs,
 ): Promise<ModelMessage[]> {
 	if (!shouldLoadDmHistory(args)) return []
+	if (!needsPriorContext(args.turnText)) {
+		console.log("[slack] dm_history skipped reason=not_referential")
+		return []
+	}
 	try {
 		const messages = await (args.fetchMessages ?? fetchDmHistoryMessages)(
 			args.botToken,

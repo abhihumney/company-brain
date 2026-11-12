@@ -2765,6 +2765,7 @@ async function runSlackTurnInner(
 	const dmHistoryMessages = await loadDmHistoryConversation({
 		isDm: isDM,
 		threadTs: ev.thread_ts,
+		turnText: displayQuestion,
 		botToken,
 		channel,
 		currentTs: ev.ts ?? "",

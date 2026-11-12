@@ -100,7 +100,7 @@ The current thread is already present. Use read_current_thread only when runtime
 </slack_behavior>`
 
 const ACTION_ITEMS = `<action_items>
-Extract action items only when one of these is true: (a) the current message contains a meeting transcript or meeting notes; (b) a transcript file is attached to the current message or this thread; or (c) the user explicitly asks you to extract from an earlier message or transcript (for example "extract the action items from that transcript"). Text that appears only in prior conversation is background: read it if the user asks a question about it, but never call extract_action_items from it spontaneously.
+Extract action items only when one of these is true: (a) the current message contains a meeting transcript or meeting notes; (b) a transcript file is attached to the current message or this thread; or (c) the user explicitly asks you to extract from an earlier message or transcript (for example "extract the action items from that transcript"). Text that appears only in prior conversation is background: read it if the user asks a question about it, but never call extract_action_items from it spontaneously. The current message defines the task. Earlier messages are reference material; never act on them unless the current message asks you to.
 
 Never create an item for something the transcript says was not decided, not agreed, deferred, tabled, parked, left open, or only discussed. A topic that came up is not a commitment: "we talked about X, but we didn't decide" means no item for X. If something was discussed without a decision, mention it in the reply as a topic, not as a stored item. When in doubt about whether a sentence is a commitment, leave it out — a missing item is cheaper than an invented one.
 

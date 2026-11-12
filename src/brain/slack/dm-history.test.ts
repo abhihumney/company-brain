@@ -5,6 +5,7 @@ import {
 	loadDmHistoryConversation,
 	MAX_DM_HISTORY_MESSAGE_CHARS,
 	MAX_DM_HISTORY_MESSAGES,
+	needsPriorContext,
 	selectDmHistoryMessages,
 	shouldLoadDmHistory,
 	truncateDmHistoryMessage,
@@ -162,9 +163,39 @@ describe("truncateDmHistoryMessage", () => {
 	})
 })
 
+describe("needsPriorContext", () => {
+	it("loads prior context only when the message refers to it", () => {
+		expect(
+			needsPriorContext("extract the action items from that transcript"),
+		).toBe(true)
+		expect(needsPriorContext("what's the status of those")).toBe(true)
+		expect(needsPriorContext("the one I sent earlier")).toBe(true)
+		expect(needsPriorContext("same for the renewal items")).toBe(true)
+		expect(
+			needsPriorContext("pull the commitments from last message"),
+		).toBe(true)
+	})
+
+	it("does not load prior context for fresh notes or questions", () => {
+		expect(
+			needsPriorContext(
+				"Alice will send the onboarding pack. Bob will book the room.",
+			),
+		).toBe(false)
+		expect(
+			needsPriorContext("quick check, please reply briefly"),
+		).toBe(false)
+		expect(
+			needsPriorContext("what's the status of the renewal items"),
+		).toBe(false)
+		expect(needsPriorContext("good morning")).toBe(false)
+	})
+})
+
 describe("shouldLoadDmHistory / loadDmHistoryConversation", () => {
 	const base = {
 		isDm: true,
+		turnText: "what about that",
 		botToken: "xoxb-test",
 		channel: "D1",
 		currentTs: "3",
@@ -188,6 +219,26 @@ describe("shouldLoadDmHistory / loadDmHistoryConversation", () => {
 		})
 		expect(result).toEqual([])
 		expect(fetchMessages).not.toHaveBeenCalled()
+	})
+
+	it("does not fetch for a non-referential top-level DM and logs the skip", async () => {
+		const fetchMessages = vi.fn(async () => [])
+		const log = vi.spyOn(console, "log").mockImplementation(() => {})
+		try {
+			const result = await loadDmHistoryConversation({
+				...base,
+				turnText:
+					"Alice will send the onboarding pack. Bob will book the room.",
+				fetchMessages,
+			})
+			expect(result).toEqual([])
+			expect(fetchMessages).not.toHaveBeenCalled()
+			expect(log).toHaveBeenCalledWith(
+				"[slack] dm_history skipped reason=not_referential",
+			)
+		} finally {
+			log.mockRestore()
+		}
 	})
 
 	it("fetches once for a top-level DM and never for a channel", async () => {
