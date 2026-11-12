@@ -44,7 +44,12 @@ type FakeSourceRow = {
 	created_at: number
 }
 
-function createFakeActionItemAgent(options: { failItemInsert?: boolean } = {}): {
+function createFakeActionItemAgent(
+	options: {
+		failItemInsert?: boolean
+		failItemTitles?: Set<string>
+	} = {},
+): {
 	agent: CompanyBrainAgent
 	rows: FakeRow[]
 	sources: FakeSourceRow[]
@@ -165,7 +170,10 @@ function createFakeActionItemAgent(options: { failItemInsert?: boolean } = {}): 
 			return []
 		}
 		if (/INSERT INTO brain_action_item/i.test(text)) {
-			if (options.failItemInsert) {
+			if (
+				options.failItemInsert ||
+				options.failItemTitles?.has(String(values[1]))
+			) {
 				throw new Error("simulated action-item insert failure")
 			}
 			const [
@@ -237,6 +245,7 @@ type ExtractToolResult = {
 function createExtractHarness(
 	options: {
 		failItemInsert?: boolean
+		failItemTitles?: Set<string>
 		turnTextLength?: number
 		turnHasCommitmentContent?: boolean
 		hasTranscriptAttachment?: boolean
@@ -1147,6 +1156,40 @@ describe("source-level idempotence", () => {
 		).toBe(true)
 		expect(rows).toHaveLength(0)
 		expect(sources).toHaveLength(0)
+	})
+
+	it("stores the remainder after a partial insert failure on retry", async () => {
+		const failTitles = new Set(["Book the offsite"])
+		const { extract, rows, sources } = createExtractHarness({
+			failItemTitles: failTitles,
+		})
+		const items = [
+			{ title: "Send the deck" },
+			{ title: "Book the offsite" },
+		]
+		const sourceRef = "1762345678.555555"
+
+		const first = await extract.execute({
+			items,
+			source: "meeting",
+			source_ref: sourceRef,
+		})
+		expect(first.stored).toHaveLength(1)
+		expect(first.failed).toHaveLength(1)
+		expect(sources[0]?.item_count).toBe(1)
+
+		failTitles.clear()
+		const second = await extract.execute({
+			items,
+			source: "meeting",
+			source_ref: sourceRef,
+		})
+		expect(second.stored).toHaveLength(1)
+		expect(second.stored[0]?.title).toBe("Book the offsite")
+		expect(second.duplicates).toBe(1)
+		expect(second.failed).toBeUndefined()
+		expect(rows).toHaveLength(2)
+		expect(sources[0]?.item_count).toBe(2)
 	})
 
 	it("stores items beyond the first 50 across two calls to the same source", async () => {
