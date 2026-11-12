@@ -155,6 +155,56 @@ export function normalizeActionItemTitle(title: string): string {
 		.trim()
 }
 
+// Only explicit phrases count. Generic words such as "decide", "decision",
+// "discuss", or "later" on their own are not rejection markers. "decide later"
+// is the narrow two-word exception needed for title-only deferred decisions.
+export const NON_DECISION_MARKERS = [
+	"didn't decide",
+	"did not decide",
+	"no decision",
+	"not decided",
+	"undecided",
+	"not agreed",
+	"no agreement",
+	"deferred",
+	"tabled",
+	"parked",
+	"left open",
+	"no conclusion",
+	"only discussed",
+	"just discussed",
+	"for discussion only",
+	"nothing decided",
+	"we'll decide later",
+	"we will decide later",
+	"decide later",
+] as const
+
+const NON_DECISION_APOSTROPHES_RE = /[\u2018\u2019\u02bc\u0060\u00b4]/g
+const NON_DECISION_INVISIBLE_SPACE_RE = /[\u00a0\u2007\u202f\u200b-\u200d\ufeff]/g
+
+export function normalizeNonDecisionText(value: string): string {
+	return value
+		.normalize("NFKC")
+		.replace(NON_DECISION_APOSTROPHES_RE, "'")
+		.replace(NON_DECISION_INVISIBLE_SPACE_RE, " ")
+		.replace(/\s+/g, " ")
+		.trim()
+		.toLowerCase()
+}
+
+/** Return the first explicit non-decision marker found in the texts. */
+export function findNonDecisionMarker(
+	texts: ReadonlyArray<string | null | undefined>,
+): string | undefined {
+	const haystack = texts
+		.map((value) => (value ? normalizeNonDecisionText(value) : ""))
+		.filter(Boolean)
+		.join("\n")
+	if (!haystack) return undefined
+	return NON_DECISION_MARKERS.find((marker) => haystack.includes(marker))
+}
+
 export function normalizeActionItemOwnerName(value: string | null | undefined): string {
 	return (value ?? "")
 		.normalize("NFKC")
@@ -1484,7 +1534,6 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 			}
 
 			type PreparedItem = {
-				index: number
 				title: string
 				detail: string | null
 				evidence: string | null
@@ -1492,21 +1541,26 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 				owner: { reference: SlackMemberReference; rawName: string } | null
 			}
 			const prepared: PreparedItem[] = []
-			const rejected: Array<{ index: number; title: string; reason: string }> =
-				[]
-			for (const [index, item] of input.items.entries()) {
+			const rejected: Array<{ title: string; reason: string }> = []
+			for (const item of input.items) {
 				const title = item.title.trim()
 				if (!title) {
-					rejected.push({ index, title: item.title, reason: "empty title" })
+					rejected.push({ title: item.title, reason: "empty title" })
 					continue
 				}
 				const due = normalizeActionItemDue(item.due)
 				if (!due.ok) {
-					rejected.push({ index, title, reason: due.error })
+					rejected.push({ title, reason: due.error })
+					continue
+				}
+				if (
+					findNonDecisionMarker([title, item.evidence, item.detail]) !==
+					undefined
+				) {
+					rejected.push({ title, reason: "non-decision" })
 					continue
 				}
 				prepared.push({
-					index,
 					title,
 					detail: item.detail?.trim() || null,
 					evidence: item.evidence?.trim() || null,

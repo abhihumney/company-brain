@@ -4,6 +4,7 @@ import { z } from "zod"
 import type { CompanyBrainAgent } from "./agent"
 import {
 	ACTION_ITEM_SIMILARITY_THRESHOLD,
+	NON_DECISION_MARKERS,
 	actionItemDedupePayload,
 	actionItemScopeForSurface,
 	actionItemSurfaceForSlackLookup,
@@ -14,6 +15,7 @@ import {
 	canStoreActionItemScope,
 	createActionItemTools,
 	describeActionItemSurface,
+	findNonDecisionMarker,
 	insertActionItem,
 	isActionItemVisibleOnSurface,
 	isActionItemVisibleToAsker,
@@ -24,6 +26,7 @@ import {
 	normalizeActionItemDue,
 	normalizeActionItemOwnerFilter,
 	normalizeActionItemTitle,
+	normalizeNonDecisionText,
 	resolveActionItemSourceIdentity,
 	type ActionItemSource,
 	type ActionItemStatus,
@@ -226,6 +229,7 @@ type ExtractToolResult = {
 	alreadyExtracted?: boolean
 	previouslyStored?: Array<{ id: string; title: string }>
 	failed?: Array<{ title: string; reason: string }>
+	rejected?: Array<{ title: string; reason: string }>
 	matchedSource?: { sourceKey: string }
 	warnings?: string[]
 	sourceKey?: string
@@ -1245,11 +1249,108 @@ describe("owner mention output", () => {
 	})
 })
 
+describe("non-decision markers", () => {
+	it("keeps the literal marker list narrow", () => {
+		expect(NON_DECISION_MARKERS).toContain("didn't decide")
+		expect(NON_DECISION_MARKERS).toContain("no agreement")
+		expect(NON_DECISION_MARKERS).toContain("we will decide later")
+		expect(NON_DECISION_MARKERS).toContain("decide later")
+		expect(NON_DECISION_MARKERS).not.toContain("decide")
+		expect(NON_DECISION_MARKERS).not.toContain("later")
+	})
+
+	it("normalises curly apostrophes and case", () => {
+		expect(normalizeNonDecisionText("  DIDN’T   decide ")).toBe(
+			"didn't decide",
+		)
+		expect(findNonDecisionMarker(["We didn’t decide."])).toBe("didn't decide")
+		expect(findNonDecisionMarker(["DID NOT DECIDE"])).toBe("did not decide")
+		expect(findNonDecisionMarker(["We'll decide later"])).toBe(
+			"we'll decide later",
+		)
+	})
+
+	it("does not reject generic words or a real commitment", () => {
+		expect(
+			findNonDecisionMarker(["Decide on the pricing tier by Friday"]),
+		).toBeUndefined()
+		expect(findNonDecisionMarker(["Send the pricing deck to the customer"])).toBe(
+			undefined,
+		)
+		expect(findNonDecisionMarker(["Review the contract redlines"])).toBe(
+			undefined,
+		)
+		expect(findNonDecisionMarker(["Discuss pricing later"])).toBeUndefined()
+	})
+})
+
+describe("non-decision extraction filter", () => {
+	const sourceRef = "1762345678.123456"
+
+	it("rejects explicit non-decisions before storing", async () => {
+		const { extract, rows } = createExtractHarness()
+		const result = await extract.execute({
+			items: [
+				{
+					title: "Decide on the price increase",
+					evidence:
+						"We talked about the price increase, but we didn't decide.",
+				},
+				{ title: "Decide later on pricing" },
+				{
+					title: "Update the travel policy",
+					evidence: "The policy update was deferred.",
+				},
+				{
+					title: "Finalize vendor terms",
+					evidence: "There was no agreement on the vendor terms.",
+				},
+			],
+			source: "meeting",
+			source_ref: sourceRef,
+		})
+		expect(result.stored).toEqual([])
+		expect(result.rejected).toHaveLength(4)
+		expect(result.rejected?.every((item) => item.reason === "non-decision")).toBe(
+			true,
+		)
+		expect(rows).toHaveLength(0)
+	})
+
+	it("keeps genuine commitments and stores exactly four of five", async () => {
+		const { extract, rows, sources } = createExtractHarness()
+		const result = await extract.execute({
+			items: [
+				{ title: "Send the pricing deck to the customer" },
+				{ title: "Decide on the pricing tier by Friday" },
+				{ title: "Review the contract redlines before Thursday" },
+				{ title: "Update the onboarding checklist" },
+				{
+					title: "Decide on the price increase",
+					evidence:
+						"We talked about the price increase, but we didn't decide.",
+				},
+			],
+			source: "meeting",
+			source_ref: sourceRef,
+		})
+		expect(result.stored).toHaveLength(4)
+		expect(result.rejected).toEqual([
+			{ title: "Decide on the price increase", reason: "non-decision" },
+		])
+		expect(rows).toHaveLength(4)
+		expect(sources).toHaveLength(1)
+		expect(sources[0]?.item_count).toBe(4)
+	})
+})
+
 describe("action-items prompt", () => {
 	it("is present even in memory-only mode and scopes mentions to other people", () => {
 		const prompt = buildSystemPrompt({ toolMode: "memory_only" })
 		expect(prompt).toContain("<action_items>")
 		expect(prompt).toContain("prior conversation is background")
+		expect(prompt).toContain("we talked about X, but we didn't decide")
+		expect(prompt).toContain("missing item is cheaper")
 		expect(prompt).toContain("someone other than the asker")
 		expect(prompt).toContain("tool returns a null mention")
 		expect(prompt).toContain('write "you" in plain text')
