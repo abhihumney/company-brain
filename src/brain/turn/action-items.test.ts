@@ -1810,6 +1810,13 @@ describe("action-items prompt", () => {
 		expect(prompt).toContain(
 			"The current message defines the task. Earlier messages are reference material",
 		)
+		expect(prompt).toContain("does not have to be a meeting transcript")
+		expect(prompt).toContain(
+			"Alice will send the onboarding pack. Bob will book the room.",
+		)
+		expect(prompt).toContain("Do not wait to be asked.")
+		expect(prompt).toContain("short note rather than meeting notes")
+		expect(prompt).toContain("A contentless message")
 		expect(prompt).toContain("we talked about X, but we didn't decide")
 		expect(prompt).toContain("missing item is cheaper")
 		expect(prompt).toContain(
