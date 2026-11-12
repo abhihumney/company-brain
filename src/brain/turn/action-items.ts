@@ -20,6 +20,13 @@ export type ActionItemStatus = (typeof ACTION_ITEM_STATUSES)[number]
 export const ACTION_ITEM_SOURCES = ["meeting", "message", "manual"] as const
 export type ActionItemSource = (typeof ACTION_ITEM_SOURCES)[number]
 
+/**
+ * A meeting extraction with no source_ref is only trusted when the current
+ * message is long enough to plausibly contain a transcript or has a transcript
+ * attachment. This blocks spontaneous extraction from prior conversation.
+ */
+export const EXTRACT_GUARD_SHORT_MESSAGE_CHARS = 400
+
 export type ActionItemOwnerResolution =
 	| "id"
 	| "email"
@@ -912,52 +919,52 @@ export type ActionItemSourceBatch = {
 	}>
 }
 
-export function listActionItemSourceBatches(
+export function listActionItemGroups(
 	agent: CompanyBrainAgent,
 	scope: string,
 ): ActionItemSourceBatch[] {
-	ensureActionItemSourceTable(agent)
 	ensureActionItemTable(agent)
 	const rows = agent.sql<{
-		source_key: string
-		item_count: number
-		created_at: number
-		id: string | null
-		title: string | null
+		id: string
+		title: string
 		owner: string | null
 		owner_name: string | null
+		source_key: string | null
+		source_ref: string | null
+		created_at: number
 	}>`
-		SELECT
-			s.source_key, s.item_count, s.created_at,
-			i.id AS id, i.title AS title, i.owner AS owner, i.owner_name AS owner_name
-		FROM brain_action_item_source s
-		LEFT JOIN brain_action_item i
-			ON i.scope = s.scope AND i.source_key = s.source_key
-		WHERE s.scope = ${scope}
-		ORDER BY s.created_at DESC, s.source_key ASC
+		SELECT id, title, owner, owner_name, source_key, source_ref, created_at
+		FROM brain_action_item
+		WHERE scope = ${scope}
+		ORDER BY created_at ASC, id ASC
 	`
-	const byKey = new Map<string, ActionItemSourceBatch>()
+	const byLabel = new Map<string, ActionItemSourceBatch>()
 	for (const row of rows) {
-		let batch = byKey.get(row.source_key)
-		if (!batch) {
-			batch = {
-				sourceKey: row.source_key,
-				itemCount: row.item_count,
+		// Group recorded sources by source_key; legacy rows fall back to their
+		// provenance source_ref, then to one legacy bucket when both are absent.
+		const sourceKey = row.source_key?.trim()
+		const sourceRef = row.source_ref?.trim()
+		const label = sourceKey || (sourceRef ? `ref:${sourceRef}` : "legacy:unknown")
+		let group = byLabel.get(label)
+		if (!group) {
+			group = {
+				sourceKey: label,
+				itemCount: 0,
 				createdAt: row.created_at,
 				items: [],
 			}
-			byKey.set(row.source_key, batch)
+			byLabel.set(label, group)
 		}
-		if (row.id && row.title) {
-			batch.items.push({
-				id: row.id,
-				title: row.title,
-				owner: row.owner,
-				ownerName: row.owner_name,
-			})
-		}
+		group.items.push({
+			id: row.id,
+			title: row.title,
+			owner: row.owner,
+			ownerName: row.owner_name,
+		})
+		group.itemCount = group.items.length
+		group.createdAt = Math.min(group.createdAt, row.created_at)
 	}
-	return [...byKey.values()]
+	return [...byLabel.values()]
 }
 
 export type ActionItemSourceBatchMatch = {
@@ -1037,6 +1044,7 @@ export function storeActionItemBatch(
 		source: ActionItemSource
 		sourceRef: string | null
 		createdBy: string | null
+		askerSlackUserId?: string | null
 		items: ReadonlyArray<StoreActionItemBatchItem>
 		now?: number
 	},
@@ -1066,7 +1074,7 @@ export function storeActionItemBatch(
 	)
 	const similarity = matchActionItemSourceBatch(
 		incomingSimilarity,
-		listActionItemSourceBatches(agent, args.scope),
+		listActionItemGroups(agent, args.scope),
 	)
 	if (similarity) {
 		return {
@@ -1117,7 +1125,10 @@ export function storeActionItemBatch(
 				title: item.title,
 				owner: item.ownerId,
 				ownerName: item.ownerName,
-				mention: item.ownerId ? `<@${item.ownerId}>` : null,
+				mention: actionItemMention(
+					item.ownerId,
+					args.askerSlackUserId,
+				),
 				status: "open",
 			})
 			continue
@@ -1204,6 +1215,10 @@ export type ActionItemToolsArgs = {
 	channelId?: string
 	turnTs?: string
 	askerSlackUserId?: string
+	/** Length of the current turn's message text; used by the extraction guard. */
+	turnTextLength?: number
+	/** Whether the current turn/thread carries a text transcript attachment. */
+	hasTranscriptAttachment?: boolean
 }
 
 type UnresolvedOwner = { title: string; rawName: string }
@@ -1233,7 +1248,23 @@ function ownerReferenceFromInput(
 	}
 }
 
-function formatActionItem(item: BrainActionItem) {
+/**
+ * Shared mention rule for both extract and list results. The asker's own item
+ * must never produce a self-ping; the prompt renders it as plain "you".
+ */
+export function actionItemMention(
+	ownerId: string | null | undefined,
+	askerSlackUserId?: string | null,
+): string | null {
+	if (!ownerId) return null
+	const asker = askerSlackUserId?.trim()
+	return ownerId === asker ? null : `<@${ownerId}>`
+}
+
+function formatActionItem(
+	item: BrainActionItem,
+	askerSlackUserId?: string | null,
+) {
 	return {
 		id: item.id,
 		title: item.title,
@@ -1246,7 +1277,7 @@ function formatActionItem(item: BrainActionItem) {
 		owner: item.owner
 			? {
 					slackUserId: item.owner,
-					mention: `<@${item.owner}>`,
+					mention: actionItemMention(item.owner, askerSlackUserId),
 					name: item.owner_name,
 				}
 			: null,
@@ -1269,6 +1300,8 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 		channelId,
 		turnTs,
 		askerSlackUserId,
+		turnTextLength,
+		hasTranscriptAttachment,
 	} = args
 	const ownerSchema = deps.z.object({
 		name: deps.z
@@ -1334,7 +1367,9 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 				)
 				return {
 					surface: describeActionItemSurface(surface),
-					items: result.items.map(formatActionItem),
+					items: result.items.map((item) =>
+						formatActionItem(item, askerSlackUserId),
+					),
 					returned: result.returned,
 					total: result.total,
 					statusCounts: result.statusCounts,
@@ -1433,6 +1468,21 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 				}
 			}
 
+			const sourceRef = input.source_ref?.trim() || null
+			if (
+				input.source === "meeting" &&
+				!sourceRef &&
+				(turnTextLength ?? 0) < EXTRACT_GUARD_SHORT_MESSAGE_CHARS &&
+				!hasTranscriptAttachment
+			) {
+				return {
+					...emptyResult,
+					alreadyExtracted: false,
+					error:
+						"extract_action_items rejected: this turn is a short message with no transcript attachment and no source_ref. Prior conversation is background, not an instruction to extract. Include the transcript in the current message, attach it, or pass the source_ref ts of the earlier message that contains it.",
+				}
+			}
+
 			type PreparedItem = {
 				index: number
 				title: string
@@ -1465,7 +1515,6 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 				})
 			}
 
-			const sourceRef = input.source_ref?.trim() || null
 			let sourceIdentity = resolveActionItemSourceIdentity({
 				sourceRef,
 				channelId,
@@ -1629,6 +1678,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 				source: input.source,
 				sourceRef,
 				createdBy: askerSlackUserId?.trim() || null,
+				askerSlackUserId,
 				items: resolvedItems,
 			})
 

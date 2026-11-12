@@ -89,6 +89,10 @@ export type AssembleTurnToolsArgs = {
 	scheduledRun?: boolean
 	/** The current Slack message ts, used as the fallback action-item source. */
 	turnTs?: string
+	/** Current message text length for the action-item extraction guard. */
+	turnTextLength?: number
+	/** Whether this turn/thread carries a transcript attachment. */
+	hasTranscriptAttachment?: boolean
 	options?: ComputeTurnOptions
 	/** Live progress sink; enables the deliberate post_update narration tool. */
 	progress?: TurnProgress
@@ -124,6 +128,8 @@ export type TurnToolAssemblySnapshot = {
 	askerIsRestricted?: boolean
 	scheduledRun?: boolean
 	turnTs?: string
+	turnTextLength?: number
+	hasTranscriptAttachment?: boolean
 	enabledFamilies: LazyToolFamily[]
 }
 
@@ -138,6 +144,8 @@ export function snapshotTurnToolAssembly(
 		| "askerIsRestricted"
 		| "scheduledRun"
 		| "turnTs"
+		| "turnTextLength"
+		| "hasTranscriptAttachment"
 	>,
 	enabledFamilies: LazyToolFamily[],
 ): TurnToolAssemblySnapshot {
@@ -179,6 +187,8 @@ export function snapshotTurnToolAssembly(
 		askerIsRestricted: args.askerIsRestricted,
 		scheduledRun: args.scheduledRun,
 		turnTs: args.turnTs,
+		turnTextLength: args.turnTextLength,
+		hasTranscriptAttachment: args.hasTranscriptAttachment,
 		enabledFamilies: [...enabledFamilies],
 	}
 }
@@ -196,6 +206,8 @@ export function restoreTurnToolAssembly(
 	| "askerIsRestricted"
 	| "scheduledRun"
 	| "turnTs"
+	| "turnTextLength"
+	| "hasTranscriptAttachment"
 	| "initialEnabledFamilies"
 > {
 	return {
@@ -228,6 +240,8 @@ export function restoreTurnToolAssembly(
 		askerIsRestricted: snapshot.askerIsRestricted,
 		scheduledRun: snapshot.scheduledRun,
 		turnTs: snapshot.turnTs,
+		turnTextLength: snapshot.turnTextLength,
+		hasTranscriptAttachment: snapshot.hasTranscriptAttachment,
 		initialEnabledFamilies: [...snapshot.enabledFamilies],
 	}
 }
@@ -263,6 +277,8 @@ export async function assembleTurnTools(
 		askerIsRestricted,
 		scheduledRun,
 		turnTs,
+		turnTextLength,
+		hasTranscriptAttachment,
 		traceId,
 		capture,
 	} = args
@@ -439,6 +455,8 @@ export async function assembleTurnTools(
 			channelId: slackLookup?.channel,
 			turnTs,
 			askerSlackUserId,
+			turnTextLength,
+			hasTranscriptAttachment,
 		}),
 	)
 	Object.assign(

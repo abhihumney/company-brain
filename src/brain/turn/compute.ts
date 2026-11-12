@@ -271,6 +271,8 @@ export async function computeTurn(
 		askerIsRestricted: asker?.isRestricted,
 		scheduledRun,
 		turnTs: input.slackTurnTs,
+		turnTextLength: question.length,
+		hasTranscriptAttachment: attachmentParts.some((part) => part.type === "text"),
 		options,
 		progress: pacingProgress,
 		traceId,

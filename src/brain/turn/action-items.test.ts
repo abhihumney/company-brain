@@ -118,6 +118,23 @@ function createFakeActionItemAgent(options: { failItemInsert?: boolean } = {}): 
 			}
 			return out
 		}
+		if (
+			/SELECT id, title, owner, owner_name, source_key, source_ref, created_at/i.test(
+				text,
+			)
+		) {
+			return rows
+				.filter((row) => row.scope === values[0])
+				.map((row) => ({
+					id: row.id,
+					title: row.title,
+					owner: row.owner,
+					owner_name: row.owner_name,
+					source_key: row.source_key,
+					source_ref: row.source_ref,
+					created_at: row.created_at,
+				}))
+		}
 		if (/SELECT id, title FROM brain_action_item/i.test(text)) {
 			return rows
 				.filter(
@@ -212,22 +229,38 @@ type ExtractToolResult = {
 	matchedSource?: { sourceKey: string }
 	warnings?: string[]
 	sourceKey?: string
+	error?: string
 }
 
-function createExtractHarness(options: { failItemInsert?: boolean } = {}) {
+function createExtractHarness(
+	options: {
+		failItemInsert?: boolean
+		turnTextLength?: number
+		hasTranscriptAttachment?: boolean
+		directoryMembers?: SlackMember[]
+		askerSlackUserId?: string
+		seedRows?: FakeRow[]
+	} = {},
+) {
 	const fake = createFakeActionItemAgent(options)
+	if (options.seedRows) fake.rows.push(...options.seedRows)
 	const tools = createActionItemTools({
 		deps: { z, tool } as unknown as TurnDeps,
 		agent: fake.agent,
 		surface: { kind: "dm" },
 		directory: {
-			load: async () => ({ ok: true as const, members: [] }),
+			load: async () => ({
+				ok: true as const,
+				members: options.directoryMembers ?? [],
+			}),
 		},
 		traceId: "test",
 		allowWrites: true,
 		channelId: "D1",
 		turnTs: "1762345679.000001",
-		askerSlackUserId: "U-ASKER",
+		askerSlackUserId: options.askerSlackUserId ?? "U-ASKER",
+		turnTextLength: options.turnTextLength ?? 500,
+		hasTranscriptAttachment: options.hasTranscriptAttachment ?? false,
 	})
 	const extract = tools.extract_action_items as unknown as {
 		execute(input: unknown): Promise<ExtractToolResult>
@@ -758,6 +791,8 @@ describe("DM visibility", () => {
 				...base,
 				id: "public",
 				title: "Public item",
+				owner: "U-OTHER",
+				owner_name: "Priya Shah",
 				scope: "public:C1",
 				created_by: asker,
 				dedupe_key: "public",
@@ -798,7 +833,12 @@ describe("DM visibility", () => {
 			askerSlackUserId: asker,
 		})
 		const list = tools.list_action_items as unknown as {
-			execute(input: unknown): Promise<{ items: Array<{ id: string }> }>
+			execute(input: unknown): Promise<{
+				items: Array<{
+					id: string
+					owner: { slackUserId: string; mention: string | null } | null
+				}>
+			}>
 		}
 		const result = await list.execute({})
 		expect(result.items.map((item) => item.id).sort()).toEqual([
@@ -806,6 +846,10 @@ describe("DM visibility", () => {
 			"owned",
 			"public",
 		])
+		const owned = result.items.find((item) => item.id === "owned")
+		const publicItem = result.items.find((item) => item.id === "public")
+		expect(owned?.owner?.mention).toBeNull()
+		expect(publicItem?.owner?.mention).toBe("<@U-OTHER>")
 	})
 })
 
@@ -1085,11 +1129,129 @@ describe("source-level idempotence", () => {
 	})
 })
 
+describe("extract guard", () => {
+	const items = [{ title: "Send the deck" }]
+
+	it("rejects a short meeting call with no source_ref and no attachment", async () => {
+		const { extract, rows } = createExtractHarness({ turnTextLength: 50 })
+		const result = await extract.execute({ items, source: "meeting" })
+		expect(result.error).toContain(
+			"short message with no transcript attachment",
+		)
+		expect(result.error).toContain("Prior conversation is background")
+		expect(result.stored).toEqual([])
+		expect(rows).toHaveLength(0)
+	})
+
+	it("allows a long current message with no source_ref", async () => {
+		const { extract } = createExtractHarness({ turnTextLength: 500 })
+		const result = await extract.execute({ items, source: "meeting" })
+		expect(result.error).toBeUndefined()
+		expect(result.stored).toHaveLength(1)
+	})
+
+	it("allows a short message when the earlier message ts is passed", async () => {
+		const { extract } = createExtractHarness({ turnTextLength: 50 })
+		const result = await extract.execute({
+			items,
+			source: "meeting",
+			source_ref: "1762345678.123456",
+		})
+		expect(result.error).toBeUndefined()
+		expect(result.stored).toHaveLength(1)
+	})
+
+	it("allows a short message when a transcript attachment is present", async () => {
+		const { extract } = createExtractHarness({
+			turnTextLength: 50,
+			hasTranscriptAttachment: true,
+		})
+		const result = await extract.execute({ items, source: "meeting" })
+		expect(result.error).toBeUndefined()
+		expect(result.stored).toHaveLength(1)
+	})
+})
+
+describe("legacy batch similarity", () => {
+	it("matches an unrecorded legacy batch grouped by source_ref", async () => {
+		const titles = [
+			"Send the vendor report",
+			"Update the travel policy",
+			"Book the offsite",
+			"Review the budget",
+		]
+		const base = {
+			detail: null,
+			owner: "U1",
+			owner_name: "Abhishek H.",
+			owner_resolution: "id",
+			status: "open",
+			source: "meeting",
+			source_key: null,
+			source_ref: "legacy-fixture-2",
+			scope: "dm",
+			due: null,
+			evidence: null,
+			created_by: "U-ASKER",
+			created_at: 1000,
+			updated_at: 1000,
+		}
+		const { extract, rows } = createExtractHarness({
+			directoryMembers: [{ id: "U1", name: "Abhishek Humney" }],
+			seedRows: titles.map((title, index) => ({
+				...base,
+				id: `legacy-${index}`,
+				title,
+				dedupe_key: `legacy-${index}`,
+			})),
+		})
+		const result = await extract.execute({
+			items: titles.map((title) => ({
+				title,
+				owner: { name: "Abhishek Humney" },
+			})),
+			source: "meeting",
+			source_ref: "1762345678.999999",
+		})
+		expect(result.stored).toEqual([])
+		expect(result.alreadyExtracted).toBe(true)
+		expect(result.duplicates).toBe(4)
+		expect(result.matchedSource?.sourceKey).toBe("ref:legacy-fixture-2")
+		expect(
+			result.warnings?.some((warning) => warning.includes("SIMILAR BATCH")),
+		).toBe(true)
+		expect(rows).toHaveLength(4)
+	})
+})
+
+describe("owner mention output", () => {
+	it("returns null for the asker and a token for another owner", async () => {
+		const { extract } = createExtractHarness({
+			directoryMembers: [
+				{ id: "U-ASKER", name: "Abhishek Humney" },
+				{ id: "U-OTHER", name: "Priya Shah" },
+			],
+		})
+		const result = await extract.execute({
+			items: [
+				{ title: "My own item", owner: { name: "Abhishek Humney" } },
+				{ title: "Someone else's item", owner: { name: "Priya Shah" } },
+			],
+			source: "meeting",
+			source_ref: "1762345678.777777",
+		})
+		expect(result.stored[0]?.mention).toBeNull()
+		expect(result.stored[1]?.mention).toBe("<@U-OTHER>")
+	})
+})
+
 describe("action-items prompt", () => {
 	it("is present even in memory-only mode and scopes mentions to other people", () => {
 		const prompt = buildSystemPrompt({ toolMode: "memory_only" })
 		expect(prompt).toContain("<action_items>")
+		expect(prompt).toContain("prior conversation is background")
 		expect(prompt).toContain("someone other than the asker")
+		expect(prompt).toContain("tool returns a null mention")
 		expect(prompt).toContain('write "you" in plain text')
 	})
 })
