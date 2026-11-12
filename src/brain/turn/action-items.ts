@@ -953,6 +953,9 @@ export type ListActionItemsResult = {
 	items: BrainActionItem[]
 	returned: number
 	total: number
+	/** Count before the query filter, after visibility/scope filters. */
+	totalInScope: number
+	hint?: string
 	statusCounts: Record<ActionItemStatus, number>
 }
 
@@ -1018,7 +1021,10 @@ export function listActionItems(
 		)
 		.filter((item) => !input.source || item.source === input.source)
 		.filter((item) => matchesOwnerFilter(item, ownerFilter))
-		.filter((item) => matchesActionItemQuery(item, input.query))
+	const hasQuery = Boolean(input.query?.trim())
+	const queryScoped = hasQuery
+		? visible.filter((item) => matchesActionItemQuery(item, input.query))
+		: visible
 
 	const statusCounts: Record<ActionItemStatus, number> = {
 		open: 0,
@@ -1026,17 +1032,27 @@ export function listActionItems(
 		done: 0,
 		dropped: 0,
 	}
-	for (const item of visible) statusCounts[item.status] += 1
+	for (const item of queryScoped) statusCounts[item.status] += 1
 
-	const filtered = input.status
+	const scoped = input.status
 		? visible.filter((item) => item.status === input.status)
 		: visible
+	const totalInScope = scoped.length
+	const filtered = input.status
+		? queryScoped.filter((item) => item.status === input.status)
+		: queryScoped
 	const limit = Math.min(Math.max(input.limit ?? 20, 1), 100)
 	const items = filtered.slice(0, limit)
+	const hint =
+		hasQuery && filtered.length < totalInScope
+			? `Query matched ${filtered.length} of ${totalInScope} items in scope. Other items exist that do not match the query — call list_action_items again without query to see all of them.`
+			: undefined
 	return {
 		items,
 		returned: items.length,
 		total: filtered.length,
+		totalInScope,
+		...(hint ? { hint } : {}),
 		statusCounts,
 	}
 }
@@ -1746,6 +1762,8 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 					),
 					returned: result.returned,
 					total: result.total,
+					totalInScope: result.totalInScope,
+					...(result.hint ? { hint: result.hint } : {}),
 					statusCounts: result.statusCounts,
 					...(result.returned === 0
 						? {
@@ -1905,7 +1923,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 					rejected.push({ title, reason: due.error })
 					continue
 				}
-				if (findNonDecisionMarker([title, item.detail]) !== undefined) {
+				if (findNonDecisionMarker([title]) !== undefined) {
 					rejected.push({ title, reason: "non-decision" })
 					continue
 				}

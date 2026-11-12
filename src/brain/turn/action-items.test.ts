@@ -976,6 +976,8 @@ describe("list query filter", () => {
 			items: Array<{ title: string }>
 			returned: number
 			total: number
+			totalInScope: number
+			hint?: string
 		}>
 	}
 
@@ -986,6 +988,8 @@ describe("list query filter", () => {
 			"Send the launch checklist to the team",
 		])
 		expect(result.total).toBe(2)
+		expect(result.totalInScope).toBe(4)
+		expect(result.hint).toContain("Query matched 2 of 4 items in scope.")
 
 		const byOwner = await list.execute({ query: "Priya" })
 		expect(byOwner.items.map((item) => item.title).sort()).toEqual([
@@ -993,6 +997,8 @@ describe("list query filter", () => {
 			"Send the launch checklist to the team",
 			"Update the travel policy",
 		])
+		expect(byOwner.totalInScope).toBe(4)
+		expect(byOwner.hint).toContain("Query matched 3 of 4 items in scope.")
 	})
 
 	it("returns empty for a query that matches nothing", async () => {
@@ -1000,12 +1006,16 @@ describe("list query filter", () => {
 		expect(result.items).toEqual([])
 		expect(result.returned).toBe(0)
 		expect(result.total).toBe(0)
+		expect(result.totalInScope).toBe(4)
+		expect(result.hint).toContain("Query matched 0 of 4 items in scope.")
 	})
 
 	it("behaves as today without a query", async () => {
 		const result = await list.execute({})
 		expect(result.items).toHaveLength(4)
 		expect(result.total).toBe(4)
+		expect(result.totalInScope).toBe(4)
+		expect(result.hint).toBeUndefined()
 	})
 })
 
@@ -1630,18 +1640,9 @@ describe("non-decision extraction filter", () => {
 		const result = await extract.execute({
 			items: [
 				{ title: "Decide later on pricing" },
-				{
-					title: "Update the travel policy",
-					detail: "The policy update was deferred.",
-				},
-				{
-					title: "Finalize vendor terms",
-					detail: "There was no agreement on the vendor terms.",
-				},
-				{
-					title: "Schedule the offsite",
-					detail: "Left open in the meeting.",
-				},
+				{ title: "Deferred vendor terms" },
+				{ title: "No agreement on vendor terms" },
+				{ title: "Office move left open" },
 			],
 			source: "meeting",
 			source_ref: sourceRef,
@@ -1660,8 +1661,28 @@ describe("non-decision extraction filter", () => {
 			items: [
 				{
 					title: "Publish the pricing page",
+					detail:
+						"Enterprise tier was discussed but not decided, so it is not part of this item.",
 					evidence:
 						"I'll publish the pricing page on Friday. We talked about the enterprise tier, but we didn't decide.",
+				},
+			],
+			source: "meeting",
+			source_ref: sourceRef,
+		})
+		expect(result.stored).toHaveLength(1)
+		expect(result.rejected).toEqual([])
+		expect(rows).toHaveLength(1)
+	})
+
+	it("accepts a title with no marker even when detail mentions a non-decision", async () => {
+		const { extract, rows } = createExtractHarness()
+		const result = await extract.execute({
+			items: [
+				{
+					title: "Decide on the price increase",
+					detail:
+						"The enterprise tier was discussed but not decided, so it is not part of this item.",
 				},
 			],
 			source: "meeting",
@@ -2019,6 +2040,9 @@ describe("action-items prompt", () => {
 		expect(prompt).toContain("call list_action_items before any other tool")
 		expect(prompt).toContain(
 			'the launch readiness list" means the action-item ledger',
+		)
+		expect(prompt).toContain(
+			"call list_action_items without the query before telling the user",
 		)
 		expect(prompt).toContain("we talked about X, but we didn't decide")
 		expect(prompt).toContain("missing item is cheaper")
