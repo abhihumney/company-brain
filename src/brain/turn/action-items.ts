@@ -564,6 +564,8 @@ export function isActionItemVisibleToAsker(
 	if (surface.kind !== "dm") {
 		return isActionItemVisibleOnSurface(item.scope, surface)
 	}
+	// Legacy rows predate created_by; they are test data and stay hidden in DMs.
+	if (!item.created_by) return false
 	const asker = askerSlackUserId?.trim() ?? ""
 	if (asker && item.owner === asker) return true
 	if (item.scope.startsWith("public:")) return true

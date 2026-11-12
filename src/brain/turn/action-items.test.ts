@@ -626,7 +626,7 @@ describe("DM visibility", () => {
 		).toBe(true)
 		expect(
 			isActionItemVisibleToAsker(
-				{ owner: null, scope: "public:C1", created_by: null },
+				{ owner: null, scope: "public:C1", created_by: "U-OTHER" },
 				dm,
 				asker,
 			),
@@ -640,7 +640,7 @@ describe("DM visibility", () => {
 		).toBe(true)
 	})
 
-	it("never shows private-channel or legacy-unowned items unless the asker owns them", () => {
+	it("never shows private-channel items unless owned, and hides legacy rows", () => {
 		expect(
 			isActionItemVisibleToAsker(
 				{ owner: "U-OTHER", scope: "private:C2", created_by: asker },
@@ -651,6 +651,22 @@ describe("DM visibility", () => {
 		expect(
 			isActionItemVisibleToAsker(
 				{ owner: null, scope: "dm", created_by: null },
+				dm,
+				asker,
+			),
+		).toBe(false)
+		// Legacy rows predate created_by and stay hidden even when owned by the
+		// asker or carrying a public scope.
+		expect(
+			isActionItemVisibleToAsker(
+				{ owner: asker, scope: "private:C2", created_by: null },
+				dm,
+				asker,
+			),
+		).toBe(false)
+		expect(
+			isActionItemVisibleToAsker(
+				{ owner: null, scope: "public:C1", created_by: null },
 				dm,
 				asker,
 			),
@@ -728,6 +744,7 @@ describe("DM visibility", () => {
 				title: "Owned private item",
 				owner: asker,
 				scope: "private:C9",
+				created_by: asker,
 				dedupe_key: "owned",
 			},
 			{
@@ -742,6 +759,7 @@ describe("DM visibility", () => {
 				id: "public",
 				title: "Public item",
 				scope: "public:C1",
+				created_by: asker,
 				dedupe_key: "public",
 			},
 			{
