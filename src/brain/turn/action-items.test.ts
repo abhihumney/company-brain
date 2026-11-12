@@ -28,6 +28,7 @@ import {
 	normalizeActionItemOwnerFilter,
 	normalizeActionItemTitle,
 	normalizeNonDecisionText,
+	requestsEarlierExtraction,
 	resolveActionItemSourceIdentity,
 	type ActionItemSource,
 	type ActionItemStatus,
@@ -241,6 +242,7 @@ type ExtractToolResult = {
 	warnings?: string[]
 	sourceKey?: string
 	error?: string
+	reason?: string
 }
 
 function createExtractHarness(
@@ -1524,6 +1526,41 @@ describe("non-decision extraction filter", () => {
 	})
 })
 
+describe("earlier extraction request predicate", () => {
+	it("recognises extraction requests aimed at prior material", () => {
+		expect(
+			requestsEarlierExtraction(
+				"pull the commitments from yesterday's meeting",
+			),
+		).toBe(true)
+		expect(
+			requestsEarlierExtraction(
+				"what action items did we agree in the last meeting",
+			),
+		).toBe(true)
+		expect(
+			requestsEarlierExtraction(
+				"extract the action items from the transcript I sent",
+			),
+		).toBe(true)
+		expect(requestsEarlierExtraction("show me the todos")).toBe(true)
+	})
+
+	it("does not treat ordinary notes or status questions as extraction requests", () => {
+		expect(
+			requestsEarlierExtraction(
+				"Alice will send the onboarding pack. Bob will book the room.",
+			),
+		).toBe(false)
+		expect(
+			requestsEarlierExtraction("quick check, please reply briefly"),
+		).toBe(false)
+		expect(
+			requestsEarlierExtraction("what's the status of the renewal items"),
+		).toBe(false)
+	})
+})
+
 describe("current-message grounding", () => {
 	const turnText =
 		"Alice will send the onboarding pack. Bob will book the room."
@@ -1619,7 +1656,7 @@ describe("current-message grounding", () => {
 
 	it("accepts the same history item when source_ref is supplied", async () => {
 		const { extract } = createExtractHarness({
-			turnText,
+			turnText: "extract the action items from that transcript",
 			turnTextLength: 60,
 			turnHasCommitmentContent: true,
 		})
@@ -1677,6 +1714,94 @@ describe("current-message grounding", () => {
 	})
 })
 
+describe("earlier source_ref gate", () => {
+	const note =
+		"Alice will send the onboarding pack. Bob will book the room."
+	const earlierSourceRef = "1794492339.018209"
+	const historyItem = {
+		title: "Finalize the partner integration",
+		evidence: "We will finalize the partner integration by Friday.",
+	}
+
+	it("rejects a source_ref for prior material when the message did not ask for it", async () => {
+		const { extract, rows, sources } = createExtractHarness({
+			turnText: note,
+			turnTextLength: 60,
+			turnHasCommitmentContent: true,
+		})
+		const result = await extract.execute({
+			items: [historyItem],
+			source: "meeting",
+			source_ref: earlierSourceRef,
+		})
+		expect(result.stored).toEqual([])
+		expect(result.reason).toBe("source_ref_not_requested")
+		expect(result.error).toContain("source_ref_not_requested")
+		expect(rows).toHaveLength(0)
+		expect(sources).toHaveLength(0)
+	})
+
+	it("allows the same source_ref when the message asks for earlier extraction", async () => {
+		const { extract } = createExtractHarness({
+			turnText: "extract the action items from that transcript",
+			turnTextLength: 60,
+			turnHasCommitmentContent: true,
+		})
+		const result = await extract.execute({
+			items: [historyItem],
+			source: "meeting",
+			source_ref: earlierSourceRef,
+		})
+		expect(result.stored).toHaveLength(1)
+		expect(result.reason).toBeUndefined()
+	})
+
+	it("leaves the current-message path unaffected", async () => {
+		const { extract } = createExtractHarness({
+			turnText: note,
+			turnTextLength: 60,
+			turnHasCommitmentContent: true,
+		})
+		const result = await extract.execute({
+			items: [
+				{
+					title: "Send the onboarding pack",
+					evidence: "Alice will send the onboarding pack.",
+				},
+			],
+			source: "meeting",
+		})
+		expect(result.stored).toHaveLength(1)
+		expect(result.reason).toBeUndefined()
+	})
+
+	it("allows a source_ref equal to the current turn ts", async () => {
+		const { extract } = createExtractHarness({
+			turnText: note,
+			turnTextLength: 60,
+			turnHasCommitmentContent: true,
+		})
+		const result = await extract.execute({
+			items: [historyItem],
+			source: "meeting",
+			source_ref: "1762345679.000001",
+		})
+		expect(result.stored).toHaveLength(1)
+		expect(result.reason).toBeUndefined()
+	})
+
+	it("leaves the source_ref path unaffected when turnText is unavailable", async () => {
+		const { extract } = createExtractHarness()
+		const result = await extract.execute({
+			items: [historyItem],
+			source: "meeting",
+			source_ref: earlierSourceRef,
+		})
+		expect(result.stored).toHaveLength(1)
+		expect(result.reason).toBeUndefined()
+	})
+})
+
 describe("action-items prompt", () => {
 	it("is present even in memory-only mode and scopes mentions to other people", () => {
 		const prompt = buildSystemPrompt({ toolMode: "memory_only" })
@@ -1686,6 +1811,9 @@ describe("action-items prompt", () => {
 		expect(prompt).toContain("missing item is cheaper")
 		expect(prompt).toContain(
 			"One extract_action_items call must describe one source only",
+		)
+		expect(prompt).toContain(
+			"Only supply source_ref for an earlier message when the user explicitly asks",
 		)
 		expect(prompt).toContain("someone other than the asker")
 		expect(prompt).toContain("tool returns a null mention")

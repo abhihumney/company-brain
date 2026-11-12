@@ -255,6 +255,34 @@ export function hasCommitmentContent(text: string): boolean {
 	)
 }
 
+const EARLIER_EXTRACTION_VERB_RE =
+	/\b(?:extract|pull out|pull up|get|find|list|give me|show me|summari[sz]e)\b/i
+const EARLIER_EXTRACTION_TARGET_RE =
+	/\b(?:action items?|action-items?|commitments?|tasks?|to-dos?|todos?)\b/i
+const EARLIER_SOURCE_RE =
+	/\b(?:that transcript|the transcript|the earlier|the previous|yesterday'?s|last meeting|above|earlier message|the one i sent|from before)\b/i
+
+/**
+ * Whether the current user message explicitly asks to extract from earlier
+ * material. Literal and tested; used only to gate a source_ref that points at
+ * a different turn, not to infer intent from prior conversation.
+ */
+export function requestsEarlierExtraction(turnText: string | undefined): boolean {
+	if (!turnText) return false
+	const normalized = turnText
+		.normalize("NFKC")
+		.replace(/[\u2018\u2019\u02bc]/g, "'")
+		.replace(/\s+/g, " ")
+		.trim()
+		.toLowerCase()
+	if (!normalized) return false
+	return (
+		(EARLIER_EXTRACTION_VERB_RE.test(normalized) &&
+			EARLIER_EXTRACTION_TARGET_RE.test(normalized)) ||
+		EARLIER_SOURCE_RE.test(normalized)
+	)
+}
+
 export function normalizeActionItemOwnerName(value: string | null | undefined): string {
 	return (value ?? "")
 		.normalize("NFKC")
@@ -1778,6 +1806,29 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 					alreadyExtracted: false,
 					error:
 						"extract_action_items rejected: this turn is a short message with no transcript attachment and no source_ref. Prior conversation is background, not an instruction to extract. Include the transcript in the current message, attach it, or pass the source_ref ts of the earlier message that contains it.",
+				}
+			}
+
+			// An earlier source_ref is the explicit "extract from that earlier
+			// message" path. It is only allowed when the current user message
+			// actually asks for an earlier extraction.
+			const currentTurnTs = turnTs?.trim()
+			if (
+				sourceRef &&
+				turnText !== undefined &&
+				currentTurnTs &&
+				sourceRef !== currentTurnTs &&
+				!requestsEarlierExtraction(turnText)
+			) {
+				console.warn(
+					`[company-brain][${traceId}] extract_action_items rejected source_ref_not_requested source_ref=${sourceRef} turnTs=${currentTurnTs}`,
+				)
+				return {
+					...emptyResult,
+					alreadyExtracted: false,
+					reason: "source_ref_not_requested",
+					error:
+						"extract_action_items rejected (source_ref_not_requested): the current message does not ask you to extract from an earlier transcript. Extract only from the current message or an attachment, or ask explicitly to extract from that earlier message.",
 				}
 			}
 
