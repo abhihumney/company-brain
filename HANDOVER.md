@@ -1,148 +1,111 @@
 # HANDOVER — Rulebook-F
 
-**Written:** 2026-11-11, end of the first build session.
+**Updated:** 2026-11-12, end of the action-item ledger session.
 **Repo:** `/Users/abhishekhumney/Deepseek/Rulebook-f`
-**Remote:** `origin` = `git@github.com:abhihumney/company-brain.git` (the user's fork) · `upstream` = `https://github.com/supermemoryai/company-brain.git` (push URL set to `no_push`)
+**Remote:** `origin` = `git@github.com:abhihumney/company-brain.git` (fork) · `upstream` push URL is `no_push`
 
 ---
 
 ## 1. What this is
 
-Rulebook-F is a fork of [supermemoryai/company-brain](https://github.com/supermemoryai/company-brain) — a Slack-native organisational agent ("company brain") — being rebuilt into the owner's product:
+A fork of [supermemoryai/company-brain](https://github.com/supermemoryai/company-brain) — a Slack-native organisational agent — being rebuilt into:
 
 > A Slack-first bot that extracts action items from internal meetings and then completes them via CLI, MCP, API, or browser automation.
 
-**Owner decisions already made:**
-
-- **Rulebook-F supersedes Rulebook-DS.** The older `getrulebook/rulebook-ds` project already builds a very similar product (its `SPEC.md` literally describes "meetings end, work starts"). It stays live until F can do its job, then gets retired. Nothing has been deleted or decommissioned yet; that needs per-item sign-off.
-- **Naming:** everything user-visible is `Rulebook-F`. Persisted identifiers were deliberately NOT renamed (see §6).
-- **Stack choices:** Anthropic direct (not DeepSeek), Claude Haiku 5.5, self-hosted memory via Docker, no hosted supermemory account.
+Stack: Cloudflare Workers + Durable Objects (`CompanyBrainAgent`), Anthropic direct (Claude Haiku 5.5), self-hosted supermemory in Docker, Slack app "Rulebook-F".
 
 ---
 
-## 2. Current state (verify these before assuming)
+## 2. Current state
 
 | Thing | Value |
 |---|---|
-| Branch | `main`, level with `origin/main` after this push |
-| HEAD | `a13f7db` + the handover commit |
-| Working tree | clean |
-| Dev server | `http://127.0.0.1:8788` — **never 8787** (see §7) |
-| Public URL | `https://rulebook-f.getrulebook.com` (Cloudflare named tunnel) |
-| Memory server | Docker container `supermemory-supermemory-1`, `127.0.0.1:6767`, up |
-| Slack workspace | `rulebook-f.slack.com` (team `T0CFY65L84D`), app `Rulebook-F` / `A0CFN46P21M` |
-| Slack home channel | `#rulebook-f` (bot-created) |
-| Notion | connected to the owner's "Getrulebook" workspace, private to the user |
+| `main` | action-item ledger **merged** (branch was `feat/action-item-ledger`, HEAD `89de3df`) |
+| Tests | **182 pass**; only the two pre-existing load failures (`quickjs-executor.test.ts` `cloudflare:` scheme, `catalog.test.ts` missing `@repo/lib/connector-availability`) |
+| Typecheck | `bun run check-types` passes |
+| Dev server | `http://127.0.0.1:8788` (log `/tmp/rbf-8788-dev.log`). **Never 8787** |
+| Tunnel | `https://rulebook-f.getrulebook.com` → 200 |
+| Memory | `supermemory-supermemory-1`, `127.0.0.1:6767`, healthy |
+| Chrome | 157.0.8103.78 on CDP `127.0.0.1:9222`; `agent-browser` 0.42.0, one daemon, attached |
+| Slack | `rulebook-f.slack.com` (team `T0CFY65L84D`), bot DM `D0CG76N938C`, human `U0CGXRTUE0G` |
+| Test harness | `scripts/rbk-slack-test.mjs` — drives the bot through signed Slack events, no browser |
+| Ledger | contains ~11 `RBK test` rows from acceptance runs; safe to clear |
 
-**Processes are plain background processes — they do not survive a reboot:**
-- dev server: `bun run dev -- --port 8788` (log `/tmp/rbf-8788-dev.log`)
-- tunnel: `cloudflared tunnel run rulebook-f` (log `/tmp/rbf-tunnel.log`, config `~/.cloudflared/config.yml`, UUID `63024301-a9dd-4257-8a60-db3218e3dd00`)
-- memory: `cd infra/supermemory && docker compose up -d`
+**Processes do not survive a reboot:** dev (`bun run dev -- --port 8788`), tunnel (`cloudflared tunnel run rulebook-f`), memory (`cd infra/supermemory && docker compose up -d`).
 
-**Secrets (never commit, never print):**
-- `.dev.vars` (mode 600) — `SUPERMEMORY_API_KEY`, `SUPERMEMORY_BASE_URL`, `ANTHROPIC_API_KEY`, `CONTAINER_SANDBOX=off`, `PUBLIC_URL`, `ENCRYPTION_SECRET`
-- `infra/supermemory/.env` (mode 600) — `ANTHROPIC_API_KEY`, `SUPERMEMORY_VERSION=0.0.9`, `SUPERMEMORY_DISABLE_TELEMETRY=1`
-
-**The Anthropic key expires 2026-12-09.** When it lapses the failure presents as an auth error, not an expiry warning.
+**Secrets (never commit, never print):** `.dev.vars` (600), `infra/supermemory/.env` (600).
+**Anthropic key expires 2026-12-09.**
 
 ---
 
-## 3. What works today (tested, not assumed)
+## 3. What shipped this session
 
-| Capability | Evidence |
-|---|---|
-| Multi-turn Slack conversation | ALPHA → BETA → correct memory recall, consecutive turns |
-| Memory write + extraction | Dreaming completes in ~10–12 min on the lite server; extracts correct facts |
-| Memory recall | Retrieved "api.rulebook.example" and "deploy freeze December 20", and volunteered caveats about both |
-| Scope privacy | A public-channel ask searched `containers=sm_org_shared` only; a DM-only secret was never retrieved |
-| Notion read | Via Code Mode (`discover_app_methods` → `run_app_code`) |
-| Notion write + approval gate | Pauses with a card naming the exact action; on approve it executes (620 ms) and the page is fetchable by ID |
-| Deny path | `policy_denied` → `outcome=blocked`; the page was confirmed absent afterwards |
-| Scheduling, skills, automations, chime, triage | Present in code (source-verified), not yet exercised end-to-end |
+The action-item ledger: transcript or short note in → structured commitments → owners resolved to real Slack users → stored → answered from storage. Tool-agnostic; no vendor connector or subscription.
 
-## 4. What does NOT exist (the actual product gap)
+- `src/brain/turn/action-items.ts` — DDL, store, source-level idempotence, similarity fallback, visibility, `extract_action_items` + `list_action_items`
+- `src/brain/turn/slack-member-resolve.ts` — name/email/handle/id → Slack user; email and handle are authoritative, never fall through to a name
+- `src/brain/slack/dm-history.ts` — prior context only when the message refers to it; ts-labelled, capped, `latest`-bounded
+- `src/brain/slack/attachments.ts` — `.txt/.vtt/.srt/.md` transcript intake, wrapped as untrusted data
+- `src/brain/prompt/system.ts` — `<action_items>` policy
+- `scripts/rbk-slack-test.mjs` — `check`/`send`/`wait`/`history` test harness (decrypts stored Slack credentials in memory, prints only lengths)
 
-- **No meeting ingestion.** No path from a transcript, Granola, Zoom, Meet, or a huddle into memory. Granola/Fireflies/Otter exist only as live-read MCP connectors — nothing persists.
-- **No action-item ledger.** No table, no owner field, no state. The only "action items" capability is a regex heuristic that says so itself: *"Status is inferred from message wording, not a task system."* Output reads "Likely open (3) … Likely done: none detected."
-- **No browser automation.** Zero references across the repo. This is the owner's most distinctive requirement and the largest unknown.
-- **CLI execution cannot authenticate.** The sandbox is deliberately credential-less and blocks `git push`/deploys via guardrails.
-
-**Estimated build effort from the code audit:** action-item ledger ~10–14h · meeting ingest route ~8–10h · close-the-loop (item → approve → execute → receipt) ~12–16h · full identity rename ~5h.
+**Verified live in Slack, with SQL evidence:** short note and transcript both store correct items; owners resolved or explicitly unassigned; bad email never mis-assigned; undecided topics excluded; re-extraction stores nothing; DM/privacy isolation; no self-mentions; status answered from the ledger; no "likely open" wording anywhere.
 
 ---
 
-## 5. Defects found this session — all fixed and committed
+## 4. Known limitations (deferred, documented)
 
-1. **Turn 2 crashed every conversation** (`1e62e6e`) — `Invalid signature in thinking block / bound to a different conversation`. Haiku 5.5 enables adaptive thinking by default, and the brain replays prior assistant turns. `thinking.block_binding.prefix_mismatch_behavior` cannot reach the wire — `@ai-sdk/anthropic` 3.0.98 strips unknown provider options. Fix: explicit `thinking: { type: "disabled" }` for `claude-haiku-5.5`. **Consequence: reasoning and `BRAIN_MAIN_EFFORT` are inert for the main model.**
-2. **Profile sync silently 400'd** (`9cd2746`, `7789fd1`) — the self-hosted server caps `entityContext` at exactly 1500 chars; the app sent ~2680. Cap enforced in `updateContainerTagSettings`. Then the capture policy was reordered to lead and compressed 1691 → 1196 chars so the guardrails survive truncation. **Still truncates:** the policy alone is 1196 but all rules total 1820, so `oneAnswer`'s second sentence is cut (its rule is duplicated in the policy, so no rule is lost).
-3. **Failed writes reported success** (`1e9f0bf`) — a `{status:"error"}` payload was returned as a *successful* tool result, so the harness recorded success and the model replied as if done, while nothing was created. Now: `run_app_code` throws a `ToolError`; approval-resume emits `error-json`; `mcp_execute_tool` throws on `isError`/unknown/blocked/denied; `getToolFinishOutput` keeps the detail in logs; the system prompt forbids implying completion for errored/paused/denied calls.
-4. **Notion create 400** (`a13f7db`) — `creation_mode:"draft"` cannot combine with `parent`. Normalised at `callMcpTool` (the single last hop for Code Mode, direct fallback and leased access).
-
-**Partial fix, unproven:** the `creation_mode` normaliser never fired in the successful live run — the model omitted the argument by itself. It is a guard, not a demonstrated fix.
-
----
-
-## 6. Naming: what was renamed and what must never be
-
-Renamed (visible identity): `SLACK_APP_NAME`, `HOME_CHANNEL_NAME` (3 copies), `PRODUCT_ALIASES` (no bare `"rulebook"` — Rulebook-DS may share a workspace), prompt persona, all Slack-facing copy, web UI strings, `<title>`.
-
-**Never rename — persisted data or identity:**
-- `sm_source` / `source_type` (`"company-brain"`, `"company-brain-slack"`)
-- Document id prefixes `company-brain-slack:` / `company-brain-channel-observe:` / `company-brain-research:` and their `startsWith` guards
-- `CompanyBrainAgent` class + DO migration tags (needs `renamed_classes`; otherwise every org's DO SQL is orphaned)
-- Container tags `sm_org_shared`, `sm_agent_self`, `user_`, `slack_channel_`
-- Cookie `brain_session`, KV `deployment:encryption-secret`, `deployment:public-url`, `brain:gateway-health:*`
-- `src/brain/prompt/build.ts` transcript label `Company Brain:` and its parser in `triage.ts:533` — coupled; changing one breaks bot-message recognition
-
-**Deferred to a pre-deploy rename:** worker name, D1 `database_name`, `package.json` name. A D1 rename is not an in-place operation.
-
-**Names already taken, do not reuse:** `rulebook-ds`, `rulebook_ds`, `Rulebook DS`, `Rulebook (dev)`, `rulebook-ds.slack.com`, Railway `engine`/`rulebook-demo`, Cloudflare `getrulebook-email`/`rbk-site`, `company-brain` (worker+D1+channel), `supermemory-brain`.
+- **No update/complete tool** — status is write-once (`open`). Marking something done, or reassigning an owner, is the next piece.
+- **Non-decision filter is title-only** — an item titled "Decide on the price increase" whose *detail* says "not decided" is accepted. Deliberate trade-off; the prompt is the primary control.
+- **Literal marker false-positives** — a title containing "deferred" (e.g. "deferred revenue schedule") is rejected.
+- **Slack ids vs names** — a name like "Will" can be mistaken for a user id in rare cases.
+- **Google Meet** — no Meet/Drive/Calendar coverage at all. Transcript upload is the workaround.
+- **Harness limitation** — synthetic user messages never reach Slack, so any flow that reads `conversations.history` needs one real message posted through the browser.
+- **Reply quality wobbles** — occasional verbose or odd phrasing (e.g. "I'm not going to walk through my internal steps"), and paraphrase rather than verbatim titles in grouped answers.
 
 ---
 
-## 7. Environment gotchas — read before running anything
+## 5. Decisions taken
 
-- **Port 8787 is poisoned.** A DSH harness stub (`python /tmp/dsh-probe-server.py`) answers *every* request with `204 No Content`. A curl there looks like success and is nothing. Always use 8788.
-- **`ENCRYPTION_SECRET` is pinned in `.dev.vars`** precisely because a hard kill once regenerated the KV secret, orphaning every encrypted token. That deadlocked sign-in (login needs the client secret it could no longer decrypt) and forced a local D1+KV wipe. **In production this must be a real Workers secret, never a generated KV value.**
-- **`agent-browser tab <label>` can silently fail** after a long gap. A stale label once caused text to be typed into the owner's live Notion page, and its title was deleted during cleanup (both restored). **Always verify `location.href` before typing.**
-- **Slack's interactive buttons need a trusted click.** A DOM `.click()` via `eval` returns success but does nothing — the Notion OAuth never opened until a real CDP click was used.
-- **Notion search lags.** Newly created pages may not appear for minutes; verify by fetching the page by ID instead.
-- **The docker compose tag defaults to `latest`.** The 0.0.9 pin lives in the ignored `infra/supermemory/.env`.
-- Two test suites fail to **load** for pre-existing reasons unrelated to this work: `quickjs-executor.test.ts` (`cloudflare:` scheme) and `catalog.test.ts` (`@repo/lib/connector-availability`). Everything else passes: **45 tests**.
-
----
-
-## 8. Open questions for the owner
-
-1. **Reasoning on the main model is off.** Acceptable for a Haiku-class cost/latency posture, but it is a real capability loss. A possible path is the SDK's `sendReasoning: false`, which would drop replayed reasoning while keeping adaptive thinking — needs tool-loop validation first.
-2. **Vector/corpus migration:** supermemory's hosted v3/v4 APIs are deprecated and shut down **2026-12-31**. Irrelevant while self-hosting on 0.0.9, but it blocks any future move to the hosted service without a v5 migration.
-3. **Retiring Rulebook-DS** — decided in principle, not executed. Needs an inventory and per-item sign-off.
-4. **Production hostname.** Currently `rulebook-f.getrulebook.com` is a dev tunnel. The product's permanent home (e.g. `app.getrulebook.com`) is unchosen.
+- **Tool-agnostic, no vendor dependency.** Fireflies was connected, measured (its action items are prose with no owner field), then disconnected.
+- **Store in a durable table**, not Notion/Linear.
+- **DM visibility restricted**: items you own, items you captured in a DM, and public items. Private-channel items need ownership.
+- **Auto-extraction on a pasted message is intended**; prior conversation is background and must never trigger extraction.
+- **Dedupe is per source** (Slack message ts), not per title; title similarity is a conservative fallback at 0.85 with matching due dates.
+- **agent-browser is the only browser driver**, with a 7-day update rule and a mandatory `connect 9222` after any daemon restart (see `~/.dsh/AGENTS.md`).
+- **Slack API harness for tests** — faster, deterministic, and it does not pollute the real DM.
 
 ---
 
-## 9. Next three steps
+## 6. Environment gotchas
 
-1. **Action-item ledger (~10–14h).** Table created in `src/brain/turn/agent.impl.ts:174` alongside the other DO tables; two tools (`extract_action_items`, `list_action_items`) registered in `assembleTurnTools` at `src/brain/turn/tools.ts:362`. Fields: id, title, owner (Slack user id), status, source (meeting/message), due date, created/updated.
-2. **Meeting ingest (~8–10h).** New route reusing `writeMemories` (`src/brain/memory/index.ts:211`) with a meetings container tag, plus transcript→action-item extraction writing rows.
-3. **Close the loop (~12–16h).** Item → approval (`src/brain/turn/approval.ts:12`) → execute via MCP → write a receipt back to the row. The CLI leg needs a credential path the sandbox deliberately forbids.
-
-**Test the transcript gap first** — it is cheap and defines the product: paste a meeting transcript, ask for action items, then ask "what's the status of those?" Today it answers from the transcript and then guesses from wording, because nothing is stored.
+- **Port 8787 is poisoned** (a DSH stub answers 204). Always 8788.
+- **The dev server hot-reloads on every file change.** Never run an acceptance test while another agent edits the tree — this corrupted one run today.
+- **agent-browser daemon restart** launches a *headless* browser unless you run `agent-browser connect 9222` and confirm the tab list shows the user's tabs.
+- **Synthetic Slack events** produce harmless warnings (`thread_not_found`, `invalid_thread_ts`, `message_not_found`) because the ts has no backing message.
+- **Harness `wait` returns the first bot message** — often an interim ack; read the final reply via `history`.
+- **Never rename persisted identifiers**: `sm_source`/`company-brain*` values, document prefixes, `CompanyBrainAgent`, DO migration tags, container tags, cookie `brain_session`, KV keys.
 
 ---
 
-## 10. Kickoff block for the next session
+## 7. Next three steps
 
-Paste this to start:
+1. **Update/complete tool** — `update_action_item` (status, owner, due) so items can be marked done and owners reassigned. This was deliberately out of the first slice, and it is what makes the ledger a workflow rather than a list.
+2. **Meeting ingest** — a route or Slack file path that takes a real transcript from Granola/Zoom/Meet and feeds the existing extraction; today it relies on paste/upload.
+3. **Google Meet connector** — none exists; needs Drive/Meet API work.
 
-> Continue Rulebook-F. Repo is `/Users/abhishekhumney/Deepseek/Rulebook-f`, branch `main`, clean tree, level with `origin`.
+---
+
+## 8. Kickoff block for the next session
+
+> Continue Rulebook-F. Repo is `/Users/abhishekhumney/Deepseek/Rulebook-f`, branch `main`, action-item ledger merged, 182 tests passing.
 >
-> Read `HANDOVER.md` first — it has the state, the decisions, the fixed defects, the naming rules and the environment gotchas.
+> Read `HANDOVER.md` first — state, decisions, known limitations and the environment gotchas.
 >
-> Standing rules: default to discuss-only; ask before building; delegate hands-on work to subagents; always give an ETA; verify claims with your own tool calls; never print secrets; never use port 8787; verify the browser tab URL before typing.
+> Standing rules: default to discuss-only; ask before building; delegate hands-on work to subagents; always give an ETA; verify claims with your own tool calls; never print secrets; never use port 8787; use the Slack test harness instead of the browser where possible, and run `agent-browser connect 9222` after any daemon restart.
 >
-> Services to check before working: dev server on `127.0.0.1:8788`, tunnel `https://rulebook-f.getrulebook.com`, Docker container `supermemory-supermemory-1`. If any is down, restart per `HANDOVER.md` §2 and say so.
+> Services to check: dev server `127.0.0.1:8788`, tunnel `https://rulebook-f.getrulebook.com`, Docker `supermemory-supermemory-1`, Chrome CDP `9222`.
 >
-> Today's job: **build the action-item ledger** (HANDOVER §9, step 1). Plan it, give an ETA, get approval, delegate the implementation, and prove it end to end with a real Slack test — including the meeting-transcript scenario, which should now produce stored items with owners and status instead of "likely open".
+> Today's job: build the update/complete tool (HANDOVER §7 step 1) — mark items done, reassign owners, edit due dates — and prove it through `scripts/rbk-slack-test.mjs`.
 >
 > The Anthropic key expires 2026-12-09; flag it if we are near that.
