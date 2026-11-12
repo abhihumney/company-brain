@@ -256,6 +256,13 @@ export async function computeTurn(
 		)
 	}
 
+	const currentTurnText = [
+		question,
+		...attachmentParts.flatMap((part) =>
+			part.type === "text" ? [part.text] : [],
+		),
+	].join("\n")
+
 	const assemblyArgs = {
 		deps,
 		env,
@@ -272,7 +279,7 @@ export async function computeTurn(
 		scheduledRun,
 		turnTs: input.slackTurnTs,
 		turnTextLength: question.length,
-		turnText: question,
+		turnText: currentTurnText,
 		hasTranscriptAttachment: attachmentParts.some((part) => part.type === "text"),
 		options,
 		progress: pacingProgress,

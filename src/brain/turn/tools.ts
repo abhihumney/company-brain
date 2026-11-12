@@ -474,6 +474,7 @@ export async function assembleTurnTools(
 			askerSlackUserId,
 			turnTextLength,
 			turnHasCommitmentContent: commitmentContent,
+			turnText,
 			hasTranscriptAttachment,
 		}),
 	)

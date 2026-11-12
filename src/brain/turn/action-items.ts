@@ -494,6 +494,42 @@ export function actionItemTitleSimilarity(a: string, b: string): number {
 	return union ? intersection / union : 0
 }
 
+export const GROUNDING_TOKEN_THRESHOLD = 0.6
+
+export function normalizeGroundingText(value: string): string {
+	return value
+		.normalize("NFKC")
+		.replace(/[\u00a0\u2007\u202f\u200b-\u200d\ufeff]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim()
+		.toLowerCase()
+}
+
+/**
+ * Ground one item in what the user just sent. Evidence must appear verbatim
+ * (after NFKC/lowercase/whitespace normalisation); without evidence, at least
+ * 60% of the title's content tokens must appear in the current turn text.
+ */
+export function isActionItemGroundedInTurn(
+	item: { title: string; evidence?: string | null },
+	turnText: string,
+): boolean {
+	const normalizedTurn = normalizeGroundingText(turnText)
+	const evidence = item.evidence?.trim()
+	if (evidence) {
+		const normalizedEvidence = normalizeGroundingText(evidence)
+		return (
+			Boolean(normalizedEvidence) && normalizedTurn.includes(normalizedEvidence)
+		)
+	}
+	const titleTokens = actionItemTitleTokens(item.title)
+	if (!titleTokens.size) return false
+	const turnTokens = actionItemTitleTokens(turnText)
+	let present = 0
+	for (const token of titleTokens) if (turnTokens.has(token)) present += 1
+	return present / titleTokens.size >= GROUNDING_TOKEN_THRESHOLD
+}
+
 export type ActionItemSimilarityItem = {
 	title: string
 	ownerKey: string
@@ -1474,6 +1510,8 @@ export type ActionItemToolsArgs = {
 	turnTextLength?: number
 	/** Whether that text shows a speaker line, transcript marker, or commitment cue. */
 	turnHasCommitmentContent?: boolean
+	/** Current turn text (including attachment text) for item grounding. */
+	turnText?: string
 	/** Whether the current turn/thread carries a text transcript attachment. */
 	hasTranscriptAttachment?: boolean
 }
@@ -1559,6 +1597,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 		askerSlackUserId,
 		turnTextLength,
 		turnHasCommitmentContent,
+		turnText,
 		hasTranscriptAttachment,
 	} = args
 	const ownerSchema = deps.z.object({
@@ -1767,6 +1806,21 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 					undefined
 				) {
 					rejected.push({ title, reason: "non-decision" })
+					continue
+				}
+				// When the source is the current turn, every item must be
+				// grounded in what the user just sent. Supplies of an explicit
+				// source_ref are the earlier-message path and skip this check.
+				if (
+					input.source === "meeting" &&
+					!sourceRef &&
+					turnText !== undefined &&
+					!isActionItemGroundedInTurn(
+						{ title, evidence: item.evidence },
+						turnText,
+					)
+				) {
+					rejected.push({ title, reason: "not_from_current_message" })
 					continue
 				}
 				prepared.push({

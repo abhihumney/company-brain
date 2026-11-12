@@ -17,6 +17,7 @@ import {
 	findNonDecisionMarker,
 	hasCommitmentContent,
 	insertActionItem,
+	isActionItemGroundedInTurn,
 	isActionItemVisibleOnSurface,
 	isActionItemVisibleToAsker,
 	isValidActionItemScope,
@@ -248,6 +249,7 @@ function createExtractHarness(
 		failItemTitles?: Set<string>
 		turnTextLength?: number
 		turnHasCommitmentContent?: boolean
+		turnText?: string
 		hasTranscriptAttachment?: boolean
 		directoryMembers?: SlackMember[]
 		askerSlackUserId?: string
@@ -273,6 +275,7 @@ function createExtractHarness(
 		askerSlackUserId: options.askerSlackUserId ?? "U-ASKER",
 		turnTextLength: options.turnTextLength ?? 500,
 		turnHasCommitmentContent: options.turnHasCommitmentContent ?? false,
+		turnText: options.turnText,
 		hasTranscriptAttachment: options.hasTranscriptAttachment ?? false,
 	})
 	const extract = tools.extract_action_items as unknown as {
@@ -1521,6 +1524,159 @@ describe("non-decision extraction filter", () => {
 	})
 })
 
+describe("current-message grounding", () => {
+	const turnText =
+		"Alice will send the onboarding pack. Bob will book the room."
+	const currentItems = [
+		{
+			title: "Send the onboarding pack",
+			evidence: "Alice will send the onboarding pack.",
+		},
+		{ title: "Book the room", evidence: "Bob will book the room." },
+	]
+
+	it("normalises evidence before substring matching", () => {
+		expect(
+			isActionItemGroundedInTurn(
+				{
+					title: "Send the onboarding pack",
+					evidence: "  ALICE   will send the onboarding pack. ",
+				},
+				turnText,
+			),
+		).toBe(true)
+		expect(
+			isActionItemGroundedInTurn(
+				{
+					title: "Finalize the partner integration",
+					evidence: "We will finalize the partner integration by Friday.",
+				},
+				turnText,
+			),
+		).toBe(false)
+	})
+
+	it("accepts current-message items with matching evidence", async () => {
+		const { extract } = createExtractHarness({
+			turnText,
+			turnTextLength: 60,
+			turnHasCommitmentContent: true,
+		})
+		const result = await extract.execute({
+			items: currentItems,
+			source: "meeting",
+		})
+		expect(result.stored).toHaveLength(2)
+		expect(result.rejected).toEqual([])
+	})
+
+	it("rejects a history-derived item but stores the legitimate current ones", async () => {
+		const { extract, rows, sources } = createExtractHarness({
+			turnText,
+			turnTextLength: 60,
+			turnHasCommitmentContent: true,
+		})
+		const result = await extract.execute({
+			items: [
+				...currentItems,
+				{
+					title: "Finalize the partner integration",
+					evidence:
+						"We will finalize the partner integration by Friday.",
+				},
+			],
+			source: "meeting",
+		})
+		expect(result.stored).toHaveLength(2)
+		expect(result.rejected).toEqual([
+			{
+				title: "Finalize the partner integration",
+				reason: "not_from_current_message",
+			},
+		])
+		expect(rows).toHaveLength(2)
+		expect(sources[0]?.item_count).toBe(2)
+	})
+
+	it("rejects a title-only item whose tokens are mostly absent", async () => {
+		const { extract } = createExtractHarness({
+			turnText,
+			turnTextLength: 60,
+			turnHasCommitmentContent: true,
+		})
+		const result = await extract.execute({
+			items: [{ title: "Finalize partner integration" }],
+			source: "meeting",
+		})
+		expect(result.stored).toEqual([])
+		expect(result.rejected).toEqual([
+			{
+				title: "Finalize partner integration",
+				reason: "not_from_current_message",
+			},
+		])
+	})
+
+	it("accepts the same history item when source_ref is supplied", async () => {
+		const { extract } = createExtractHarness({
+			turnText,
+			turnTextLength: 60,
+			turnHasCommitmentContent: true,
+		})
+		const result = await extract.execute({
+			items: [
+				{
+					title: "Finalize the partner integration",
+					evidence:
+						"We will finalize the partner integration by Friday.",
+				},
+			],
+			source: "meeting",
+			source_ref: "1794492339.018209",
+		})
+		expect(result.stored).toHaveLength(1)
+		expect(result.rejected).toEqual([])
+	})
+
+	it("skips grounding when turnText is unavailable", async () => {
+		const { extract } = createExtractHarness()
+		const result = await extract.execute({
+			items: [
+				{
+					title: "Finalize the partner integration",
+					evidence:
+						"We will finalize the partner integration by Friday.",
+				},
+			],
+			source: "meeting",
+		})
+		expect(result.stored).toHaveLength(1)
+		expect(result.rejected).toEqual([])
+	})
+
+	it("stores exactly one item when current and history items are mixed", async () => {
+		const { extract } = createExtractHarness({
+			turnText,
+			turnTextLength: 60,
+			turnHasCommitmentContent: true,
+		})
+		const result = await extract.execute({
+			items: [
+				currentItems[0]!,
+				{
+					title: "Finalize the partner integration",
+					evidence:
+						"We will finalize the partner integration by Friday.",
+				},
+			],
+			source: "meeting",
+		})
+		expect(result.stored).toHaveLength(1)
+		expect(result.stored[0]?.title).toBe("Send the onboarding pack")
+		expect(result.rejected).toHaveLength(1)
+	})
+})
+
 describe("action-items prompt", () => {
 	it("is present even in memory-only mode and scopes mentions to other people", () => {
 		const prompt = buildSystemPrompt({ toolMode: "memory_only" })
@@ -1528,6 +1684,9 @@ describe("action-items prompt", () => {
 		expect(prompt).toContain("prior conversation is background")
 		expect(prompt).toContain("we talked about X, but we didn't decide")
 		expect(prompt).toContain("missing item is cheaper")
+		expect(prompt).toContain(
+			"One extract_action_items call must describe one source only",
+		)
 		expect(prompt).toContain("someone other than the asker")
 		expect(prompt).toContain("tool returns a null mention")
 		expect(prompt).toContain('write "you" in plain text')
