@@ -907,6 +907,108 @@ describe("DM visibility", () => {
 	})
 })
 
+describe("list query filter", () => {
+	const asker = "U-ASKER"
+	const fake = createFakeActionItemAgent()
+	const base = {
+		detail: null,
+		owner: null,
+		owner_name: null,
+		owner_resolution: null,
+		status: "open",
+		source: "manual",
+		source_ref: null,
+		source_key: null,
+		scope: "dm",
+		due: null,
+		evidence: null,
+		created_by: asker,
+		created_at: 1000,
+		updated_at: 1000,
+	}
+	fake.rows.push(
+		{
+			...base,
+			id: "launch-checklist",
+			title: "Send the launch checklist to the team",
+			owner: "U-PRIYA",
+			owner_name: "Priya Shah",
+			dedupe_key: "launch-checklist",
+		},
+		{
+			...base,
+			id: "launch-readiness",
+			title: "Launch readiness review",
+			owner: "U-SAM",
+			owner_name: "Sam Rivera",
+			dedupe_key: "launch-readiness",
+		},
+		{
+			...base,
+			id: "travel-policy",
+			title: "Update the travel policy",
+			owner: "U-PRIYA",
+			owner_name: "Priya Shah",
+			dedupe_key: "travel-policy",
+		},
+		{
+			...base,
+			id: "pricing-page",
+			title: "Publish the pricing page",
+			owner: "U-PRIYA",
+			owner_name: "Priya Shah",
+			dedupe_key: "pricing-page",
+		},
+	)
+	const tools = createActionItemTools({
+		deps: { z, tool } as unknown as TurnDeps,
+		agent: fake.agent,
+		surface: { kind: "dm" },
+		directory: {
+			load: async () => ({ ok: true as const, members: [] }),
+		},
+		traceId: "test",
+		allowWrites: false,
+		askerSlackUserId: asker,
+	})
+	const list = tools.list_action_items as unknown as {
+		execute(input: unknown): Promise<{
+			items: Array<{ title: string }>
+			returned: number
+			total: number
+		}>
+	}
+
+	it("filters by title and owner token overlap", async () => {
+		const result = await list.execute({ query: "launch readiness" })
+		expect(result.items.map((item) => item.title).sort()).toEqual([
+			"Launch readiness review",
+			"Send the launch checklist to the team",
+		])
+		expect(result.total).toBe(2)
+
+		const byOwner = await list.execute({ query: "Priya" })
+		expect(byOwner.items.map((item) => item.title).sort()).toEqual([
+			"Publish the pricing page",
+			"Send the launch checklist to the team",
+			"Update the travel policy",
+		])
+	})
+
+	it("returns empty for a query that matches nothing", async () => {
+		const result = await list.execute({ query: "quarterly lunar eclipse" })
+		expect(result.items).toEqual([])
+		expect(result.returned).toBe(0)
+		expect(result.total).toBe(0)
+	})
+
+	it("behaves as today without a query", async () => {
+		const result = await list.execute({})
+		expect(result.items).toHaveLength(4)
+		expect(result.total).toBe(4)
+	})
+})
+
 describe("owner filter", () => {
 	it("normalises raw ids, mentions, and names", () => {
 		expect(normalizeActionItemOwnerFilter("U123")).toBe("u123")
@@ -1527,19 +1629,18 @@ describe("non-decision extraction filter", () => {
 		const { extract, rows } = createExtractHarness()
 		const result = await extract.execute({
 			items: [
-				{
-					title: "Decide on the price increase",
-					evidence:
-						"We talked about the price increase, but we didn't decide.",
-				},
 				{ title: "Decide later on pricing" },
 				{
 					title: "Update the travel policy",
-					evidence: "The policy update was deferred.",
+					detail: "The policy update was deferred.",
 				},
 				{
 					title: "Finalize vendor terms",
-					evidence: "There was no agreement on the vendor terms.",
+					detail: "There was no agreement on the vendor terms.",
+				},
+				{
+					title: "Schedule the offsite",
+					detail: "Left open in the meeting.",
 				},
 			],
 			source: "meeting",
@@ -1553,6 +1654,24 @@ describe("non-decision extraction filter", () => {
 		expect(rows).toHaveLength(0)
 	})
 
+	it("accepts a valid item whose evidence quotes a neighbouring non-decision", async () => {
+		const { extract, rows } = createExtractHarness()
+		const result = await extract.execute({
+			items: [
+				{
+					title: "Publish the pricing page",
+					evidence:
+						"I'll publish the pricing page on Friday. We talked about the enterprise tier, but we didn't decide.",
+				},
+			],
+			source: "meeting",
+			source_ref: sourceRef,
+		})
+		expect(result.stored).toHaveLength(1)
+		expect(result.rejected).toEqual([])
+		expect(rows).toHaveLength(1)
+	})
+
 	it("keeps genuine commitments and stores exactly four of five", async () => {
 		const { extract, rows, sources } = createExtractHarness()
 		const result = await extract.execute({
@@ -1562,7 +1681,7 @@ describe("non-decision extraction filter", () => {
 				{ title: "Review the contract redlines before Thursday" },
 				{ title: "Update the onboarding checklist" },
 				{
-					title: "Decide on the price increase",
+					title: "Decide later on the price increase",
 					evidence:
 						"We talked about the price increase, but we didn't decide.",
 				},
@@ -1572,7 +1691,7 @@ describe("non-decision extraction filter", () => {
 		})
 		expect(result.stored).toHaveLength(4)
 		expect(result.rejected).toEqual([
-			{ title: "Decide on the price increase", reason: "non-decision" },
+			{ title: "Decide later on the price increase", reason: "non-decision" },
 		])
 		expect(rows).toHaveLength(4)
 		expect(sources).toHaveLength(1)
@@ -1897,8 +2016,9 @@ describe("action-items prompt", () => {
 		expect(prompt).toContain("Do not wait to be asked.")
 		expect(prompt).toContain("short note rather than meeting notes")
 		expect(prompt).toContain("A contentless message")
+		expect(prompt).toContain("call list_action_items before any other tool")
 		expect(prompt).toContain(
-			"must be answered from list_action_items first",
+			'the launch readiness list" means the action-item ledger',
 		)
 		expect(prompt).toContain("we talked about X, but we didn't decide")
 		expect(prompt).toContain("missing item is cheaper")

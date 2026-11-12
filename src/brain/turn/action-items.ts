@@ -945,6 +945,7 @@ export type ListActionItemsInput = {
 	status?: ActionItemStatus
 	owner?: string
 	source?: ActionItemSource
+	query?: string
 	limit?: number
 }
 
@@ -965,6 +966,32 @@ function matchesOwnerFilter(
 		normalizeMemberMatchText(item.owner_name ?? "") ===
 		normalizeMemberMatchText(filter)
 	)
+}
+
+function matchesActionItemQuery(
+	item: BrainActionItem,
+	query: string | undefined,
+): boolean {
+	const normalizedQuery = (query ?? "")
+		.normalize("NFKC")
+		.replace(/\s+/g, " ")
+		.trim()
+		.toLowerCase()
+	if (!normalizedQuery) return true
+	const haystack = [item.title, item.owner_name, item.owner]
+		.filter((value): value is string => Boolean(value))
+		.join(" ")
+		.normalize("NFKC")
+		.replace(/\s+/g, " ")
+		.toLowerCase()
+	if (haystack.includes(normalizedQuery)) return true
+	const queryTokens = actionItemTitleTokens(normalizedQuery)
+	if (!queryTokens.size) return false
+	const haystackTokens = actionItemTitleTokens(haystack)
+	for (const token of queryTokens) {
+		if (haystackTokens.has(token)) return true
+	}
+	return false
 }
 
 /**
@@ -991,6 +1018,7 @@ export function listActionItems(
 		)
 		.filter((item) => !input.source || item.source === input.source)
 		.filter((item) => matchesOwnerFilter(item, ownerFilter))
+		.filter((item) => matchesActionItemQuery(item, input.query))
 
 	const statusCounts: Record<ActionItemStatus, number> = {
 		open: 0,
@@ -1656,7 +1684,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 	const tools: ToolSet = {
 		list_action_items: deps.tool({
 			description:
-				"List stored action items with their real status from the action-item ledger. Visibility is decided by the current Slack surface: in a public channel you see only items stored from public channels; in a private channel you see that channel's private items plus public items. In a DM you see only items owned by you, DM items you captured, and public items; private-channel items appear in a DM only when you own them, and legacy items with no creator are not shown in DMs. When the surface is unknown, only items with unknown scope are visible. The returned status is stored and authoritative — never call it 'likely'. Use the total and statusCounts to summarize; use status/owner/source/limit to narrow.",
+				"List stored action items with their real status from the action-item ledger. Visibility is decided by the current Slack surface: in a public channel you see only items stored from public channels; in a private channel you see that channel's private items plus public items. In a DM you see only items owned by you, DM items you captured, and public items; private-channel items appear in a DM only when you own them, and legacy items with no creator are not shown in DMs. When the surface is unknown, only items with unknown scope are visible. The returned status is stored and authoritative — never call it 'likely'. Use the total and statusCounts to summarize; use status/owner/source/limit to narrow. Use query for questions like 'status of X', 'what's left on X', or 'who owns X', where X is a project, meeting, or topic; it matches title or owner text case-insensitively by substring or token overlap.",
 			inputSchema: deps.z.object({
 				status: deps.z
 					.enum(ACTION_ITEM_STATUSES)
@@ -1672,6 +1700,12 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 					.enum(ACTION_ITEM_SOURCES)
 					.optional()
 					.describe("Only return items from this source."),
+				query: deps.z
+					.string()
+					.optional()
+					.describe(
+						"Project, meeting, topic, or owner text to match against item titles and owners, e.g. 'launch readiness'.",
+					),
 				limit: deps.z
 					.number()
 					.int()
@@ -1697,12 +1731,13 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 						status,
 						owner: input.owner,
 						source,
+						query: input.query,
 						limit: input.limit,
 					},
 					askerSlackUserId,
 				)
 				console.log(
-					`[company-brain][${traceId}] list_action_items surface=${surface.kind} status=${status ?? "any"} owner=${input.owner ?? "any"} returned=${result.returned} total=${result.total} ms=${Date.now() - startedAt}`,
+					`[company-brain][${traceId}] list_action_items surface=${surface.kind} status=${status ?? "any"} owner=${input.owner ?? "any"} query=${input.query ?? "any"} returned=${result.returned} total=${result.total} ms=${Date.now() - startedAt}`,
 				)
 				return {
 					surface: describeActionItemSurface(surface),
@@ -1870,10 +1905,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 					rejected.push({ title, reason: due.error })
 					continue
 				}
-				if (
-					findNonDecisionMarker([title, item.evidence, item.detail]) !==
-					undefined
-				) {
+				if (findNonDecisionMarker([title, item.detail]) !== undefined) {
 					rejected.push({ title, reason: "non-decision" })
 					continue
 				}
