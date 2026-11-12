@@ -272,6 +272,7 @@ export async function computeTurn(
 		scheduledRun,
 		turnTs: input.slackTurnTs,
 		turnTextLength: question.length,
+		turnText: question,
 		hasTranscriptAttachment: attachmentParts.some((part) => part.type === "text"),
 		options,
 		progress: pacingProgress,

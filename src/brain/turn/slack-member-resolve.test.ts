@@ -163,15 +163,30 @@ describe("resolveSlackMemberReference", () => {
 		expect(result.matchedBy).toBe("email")
 	})
 
-	it("falls back to the name when the email does not match", () => {
+	it("does not fall back to the name when the supplied email misses", () => {
 		const result = resolve({
 			name: "Sam Rivera",
 			email: "missing@example.com",
 		})
-		expect(result.status).toBe("resolved")
-		if (result.status !== "resolved") return
-		expect(result.member.id).toBe("U2")
-		expect(result.matchedBy).toBe("real_name")
+		expect(result).toEqual({
+			status: "unresolved",
+			reason: "email_no_match",
+		})
+		expect(resolve({ email: "nobody@x.com", name: "Abhishek" })).toEqual({
+			status: "unresolved",
+			reason: "email_no_match",
+		})
+	})
+
+	it("does not fall back to the name when the supplied handle misses", () => {
+		const result = resolve({
+			name: "Sam Rivera",
+			handle: "not-a-handle",
+		})
+		expect(result).toEqual({
+			status: "unresolved",
+			reason: "handle_no_match",
+		})
 	})
 
 	it("resolves a handle with or without the @ and case-insensitively", () => {
@@ -220,7 +235,10 @@ describe("resolveSlackMemberReference", () => {
 
 	it("ignores bots", () => {
 		const result = resolve({ email: "bot@example.com" })
-		expect(result).toEqual({ status: "unresolved" })
+		expect(result).toEqual({
+			status: "unresolved",
+			reason: "email_no_match",
+		})
 		const byName = resolve({ name: "Sam Bot" })
 		expect(byName).toEqual({ status: "unresolved" })
 	})

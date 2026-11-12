@@ -10,12 +10,12 @@ import {
 	actionItemSurfaceForSlackLookup,
 	actionItemTitleSimilarity,
 	buildActionItemDedupeKey,
-	buildActionItemRowKey,
 	buildTitleFallbackSourceKey,
 	canStoreActionItemScope,
 	createActionItemTools,
 	describeActionItemSurface,
 	findNonDecisionMarker,
+	hasCommitmentContent,
 	insertActionItem,
 	isActionItemVisibleOnSurface,
 	isActionItemVisibleToAsker,
@@ -87,42 +87,27 @@ function createFakeActionItemAgent(options: { failItemInsert?: boolean } = {}): 
 					source.scope === values[0] && source.source_key === values[1],
 			)
 		}
-		if (/SELECT\s+s\.source_key, s\.item_count/i.test(text)) {
-			const scope = values[0]
-			const out: Array<Record<string, unknown>> = []
-			for (const source of sources.filter((entry) => entry.scope === scope)) {
-				const items = rows.filter(
-					(row) =>
-						row.scope === source.scope && row.source_key === source.source_key,
+		if (
+			/SELECT id, title, owner, owner_name, scope, created_by, created_at/i.test(
+				text,
+			)
+		) {
+			return rows
+				.filter(
+					(row) => row.scope === values[0] && row.source_key === values[1],
 				)
-				if (!items.length) {
-					out.push({
-						source_key: source.source_key,
-						item_count: source.item_count,
-						created_at: source.created_at,
-						id: null,
-						title: null,
-						owner: null,
-						owner_name: null,
-					})
-					continue
-				}
-				for (const item of items) {
-					out.push({
-						source_key: source.source_key,
-						item_count: source.item_count,
-						created_at: source.created_at,
-						id: item.id,
-						title: item.title,
-						owner: item.owner,
-						owner_name: item.owner_name,
-					})
-				}
-			}
-			return out
+				.map((row) => ({
+					id: row.id,
+					title: row.title,
+					owner: row.owner,
+					owner_name: row.owner_name,
+					scope: row.scope,
+					created_by: row.created_by,
+					created_at: row.created_at,
+				}))
 		}
 		if (
-			/SELECT id, title, owner, owner_name, source_key, source_ref, created_at/i.test(
+			/SELECT\s+id, title, owner, owner_name, source_key, source_ref, scope,/i.test(
 				text,
 			)
 		) {
@@ -135,8 +120,20 @@ function createFakeActionItemAgent(options: { failItemInsert?: boolean } = {}): 
 					owner_name: row.owner_name,
 					source_key: row.source_key,
 					source_ref: row.source_ref,
+					scope: row.scope,
+					created_by: row.created_by,
 					created_at: row.created_at,
 				}))
+		}
+		if (/SELECT COUNT\(\*\) AS n FROM brain_action_item/i.test(text)) {
+			return [
+				{
+					n: rows.filter(
+						(row) =>
+							row.scope === values[0] && row.source_key === values[1],
+					).length,
+				},
+			]
 		}
 		if (/SELECT id, title FROM brain_action_item/i.test(text)) {
 			return rows
@@ -152,11 +149,12 @@ function createFakeActionItemAgent(options: { failItemInsert?: boolean } = {}): 
 		}
 		if (/INSERT INTO brain_action_item_source/i.test(text)) {
 			const [scope, source_key, item_count, created_at] = values
-			if (
-				!sources.some(
-					(source) => source.scope === scope && source.source_key === source_key,
-				)
-			) {
+			const existing = sources.find(
+				(source) => source.scope === scope && source.source_key === source_key,
+			)
+			if (existing) {
+				existing.item_count = item_count as number
+			} else {
 				sources.push({
 					scope: scope as string,
 					source_key: source_key as string,
@@ -240,6 +238,7 @@ function createExtractHarness(
 	options: {
 		failItemInsert?: boolean
 		turnTextLength?: number
+		turnHasCommitmentContent?: boolean
 		hasTranscriptAttachment?: boolean
 		directoryMembers?: SlackMember[]
 		askerSlackUserId?: string
@@ -264,6 +263,7 @@ function createExtractHarness(
 		turnTs: "1762345679.000001",
 		askerSlackUserId: options.askerSlackUserId ?? "U-ASKER",
 		turnTextLength: options.turnTextLength ?? 500,
+		turnHasCommitmentContent: options.turnHasCommitmentContent ?? false,
 		hasTranscriptAttachment: options.hasTranscriptAttachment ?? false,
 	})
 	const extract = tools.extract_action_items as unknown as {
@@ -327,16 +327,6 @@ describe("dedupe", () => {
 			})
 		expect(payload("dm")).not.toBe(payload("public:C1"))
 		expect(payload("public:C1")).not.toBe(payload("private:C1"))
-	})
-
-	it("builds source-scoped row keys independent of item text", async () => {
-		const first = await buildActionItemRowKey("slack:C1:1.000001", 0)
-		const same = await buildActionItemRowKey("slack:C1:1.000001", 0)
-		const nextItem = await buildActionItemRowKey("slack:C1:1.000001", 1)
-		const otherSource = await buildActionItemRowKey("slack:C1:1.000002", 0)
-		expect(first).toBe(same)
-		expect(first).not.toBe(nextItem)
-		expect(first).not.toBe(otherSource)
 	})
 })
 
@@ -630,6 +620,20 @@ describe("batch similarity safety net", () => {
 			[{ title: "Get Q1 budget signed off", ownerKey: "id:u1" }],
 			pass1.map((title) => ({ title, ownerKey: "id:u1" })),
 		)
+		expect(match.matched).toBe(false)
+	})
+
+	it("does not let one existing item satisfy multiple incoming items", () => {
+		const match = matchActionItemBatch(
+			[
+				{ title: "Review launch plan", ownerKey: "id:u1" },
+				{ title: "Review the launch plan", ownerKey: "id:u1" },
+				{ title: "Review launch plans", ownerKey: "id:u1" },
+			],
+			[{ title: "Review launch plan", ownerKey: "id:u1" }],
+		)
+		expect(match.matchedCount).toBe(1)
+		expect(match.ratio).toBeCloseTo(1 / 3)
 		expect(match.matched).toBe(false)
 	})
 
@@ -1030,10 +1034,7 @@ describe("source-level idempotence", () => {
 		expect(rows[0]?.source_key).toBe(`slack:D1:${sourceRef}`)
 
 		const second = await extract.execute({
-			items: [
-				{ title: "Circulate the deck" },
-				{ title: "Move the offsite" },
-			],
+			items,
 			source: "meeting",
 			source_ref: sourceRef,
 		})
@@ -1069,16 +1070,32 @@ describe("source-level idempotence", () => {
 			source: "meeting",
 			source_ref: "1762345678.222222",
 		})
-		expect(second.stored).toEqual([])
-		expect(second.alreadyExtracted).toBe(true)
+		expect(second.stored).toHaveLength(1)
+		expect(second.stored[0]?.title).toBe("Get Q1 budget signed off")
+		expect(second.alreadyExtracted).toBe(false)
 		expect(second.duplicates).toBe(3)
 		expect(second.matchedSource?.sourceKey).toBe(
 			"slack:D1:1762345678.111111",
 		)
 		expect(
-			second.warnings?.some((warning) => warning.includes("SIMILAR BATCH")),
+			second.warnings?.some((warning) => warning.includes("MATCHED EXISTING")),
 		).toBe(true)
-		expect(rows).toHaveLength(3)
+		expect(rows).toHaveLength(4)
+
+		const third = await extract.execute({
+			items: [
+				{ title: "Circulate the Q1 budget draft to finance" },
+				{ title: "Pull vendor spend numbers and send to Abhishek" },
+				{ title: "Update the travel policy before month end" },
+				{ title: "Get Q1 budget signed off" },
+			],
+			source: "meeting",
+			source_ref: "1762345678.222222",
+		})
+		expect(third.stored).toEqual([])
+		expect(third.duplicates).toBe(4)
+		expect(third.alreadyExtracted).toBe(true)
+		expect(rows).toHaveLength(4)
 	})
 
 	it("does not block a weakly overlapping new source on an identical title", async () => {
@@ -1131,6 +1148,57 @@ describe("source-level idempotence", () => {
 		expect(rows).toHaveLength(0)
 		expect(sources).toHaveLength(0)
 	})
+
+	it("stores items beyond the first 50 across two calls to the same source", async () => {
+		const { extract, rows, sources } = createExtractHarness()
+		const sourceRef = "1762345678.666666"
+		const firstItems = Array.from({ length: 50 }, (_, index) => ({
+			title: `Commitment ${index + 1}`,
+		}))
+		const first = await extract.execute({
+			items: firstItems,
+			source: "meeting",
+			source_ref: sourceRef,
+		})
+		expect(first.stored).toHaveLength(50)
+		expect(sources[0]?.item_count).toBe(50)
+
+		const second = await extract.execute({
+			items: [
+				{ title: "Commitment 1" },
+				{ title: "Commitment 2" },
+				{ title: "Commitment 51" },
+				{ title: "Commitment 52" },
+			],
+			source: "meeting",
+			source_ref: sourceRef,
+		})
+		expect(second.stored).toHaveLength(2)
+		expect(second.duplicates).toBe(2)
+		expect(second.alreadyExtracted).toBe(false)
+		expect(rows).toHaveLength(52)
+		expect(sources[0]?.item_count).toBe(52)
+	})
+})
+
+describe("commitment content predicate", () => {
+	it("recognises speaker lines, transcript markers, and commitment cues", () => {
+		expect(
+			hasCommitmentContent("Alice will send the deck. Bob books the room."),
+		).toBe(true)
+		expect(hasCommitmentContent("Alice: I'll send the deck.")).toBe(true)
+		expect(hasCommitmentContent("Here is the meeting transcript.")).toBe(true)
+		expect(hasCommitmentContent("Need to update the deck")).toBe(true)
+		expect(hasCommitmentContent("Due Friday")).toBe(true)
+		expect(hasCommitmentContent("I will follow up tomorrow")).toBe(true)
+	})
+
+	it("does not treat a contentless check as a commitment", () => {
+		expect(hasCommitmentContent("quick check, please reply briefly")).toBe(
+			false,
+		)
+		expect(hasCommitmentContent("")).toBe(false)
+	})
 })
 
 describe("extract guard", () => {
@@ -1161,6 +1229,16 @@ describe("extract guard", () => {
 			source: "meeting",
 			source_ref: "1762345678.123456",
 		})
+		expect(result.error).toBeUndefined()
+		expect(result.stored).toHaveLength(1)
+	})
+
+	it("allows a short message that contains commitment content", async () => {
+		const { extract } = createExtractHarness({
+			turnTextLength: 50,
+			turnHasCommitmentContent: true,
+		})
+		const result = await extract.execute({ items, source: "meeting" })
 		expect(result.error).toBeUndefined()
 		expect(result.stored).toHaveLength(1)
 	})
@@ -1225,6 +1303,62 @@ describe("legacy batch similarity", () => {
 			result.warnings?.some((warning) => warning.includes("SIMILAR BATCH")),
 		).toBe(true)
 		expect(rows).toHaveLength(4)
+	})
+
+	it("does not let another asker's DM rows suppress extraction", async () => {
+		const titles = [
+			"Send the vendor report",
+			"Update the travel policy",
+			"Book the offsite",
+			"Review the budget",
+		]
+		const base = {
+			detail: null,
+			owner: "U-B",
+			owner_name: "B Person",
+			owner_resolution: "id",
+			status: "open",
+			source: "meeting",
+			source_key: null,
+			source_ref: "b-batch",
+			scope: "dm",
+			due: null,
+			evidence: null,
+			created_by: "U-B",
+			created_at: 1000,
+			updated_at: 1000,
+		}
+		const { extract, rows } = createExtractHarness({
+			askerSlackUserId: "U-A",
+			directoryMembers: [{ id: "U-B", name: "B Person" }],
+			seedRows: [
+				...titles.map((title, index) => ({
+					...base,
+					id: `b-${index}`,
+					title,
+					dedupe_key: `b-${index}`,
+				})),
+				...titles.map((title, index) => ({
+					...base,
+					id: `legacy-${index}`,
+					title,
+					created_by: null,
+					source_ref: "legacy-b",
+					dedupe_key: `legacy-${index}`,
+				})),
+			],
+		})
+		const result = await extract.execute({
+			items: titles.map((title) => ({
+				title,
+				owner: { name: "B Person" },
+			})),
+			source: "meeting",
+			source_ref: "1762345678.777777",
+		})
+		expect(result.stored).toHaveLength(4)
+		expect(result.alreadyExtracted).toBe(false)
+		expect(rows).toHaveLength(12)
 	})
 })
 

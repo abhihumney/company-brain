@@ -39,7 +39,10 @@ export type SlackMemberResolution =
 			candidates: SlackMemberCandidate[]
 			totalCandidates: number
 	  }
-	| { status: "unresolved" }
+	| {
+			status: "unresolved"
+			reason?: "email_no_match" | "handle_no_match"
+	  }
 
 const MAX_AMBIGUOUS_CANDIDATES = 10
 const INVISIBLE_SPACE_RE = /[\u00a0\u2007\u202f\u200b-\u200d\ufeff]/g
@@ -218,6 +221,9 @@ export function resolveSlackMemberReference(
 				.map((member) => ({ member, matchedBy: "email" as const })),
 		)
 		if (byEmail) return byEmail
+		// A supplied email is authoritative: never resolve a different person
+		// through a name fallback after an email miss.
+		return { status: "unresolved", reason: "email_no_match" }
 	}
 
 	const handle = normalizeMemberMatchText(reference.handle)
@@ -228,6 +234,8 @@ export function resolveSlackMemberReference(
 				.map((member) => ({ member, matchedBy: "handle" as const })),
 		)
 		if (byHandle) return byHandle
+		// A supplied handle is likewise final.
+		return { status: "unresolved", reason: "handle_no_match" }
 	}
 
 	const name = normalizeMemberMatchText(reference.name)
@@ -331,7 +339,11 @@ type ResolveMembersToolResult =
 			index: number
 			input: SlackMemberReference
 			status: "unresolved"
-			reason: "empty_reference" | "no_match"
+			reason:
+				| "empty_reference"
+				| "no_match"
+				| "email_no_match"
+				| "handle_no_match"
 	  }
 
 function isEmptyReference(reference: SlackMemberReference): boolean {
@@ -417,7 +429,7 @@ export function createResolveSlackMembersTool(
 							index,
 							input,
 							status: "unresolved",
-							reason: "no_match",
+							reason: resolution.reason ?? "no_match",
 						}
 					},
 				)

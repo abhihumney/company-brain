@@ -44,6 +44,7 @@ import { createSendToTools } from "../tools/send-to"
 import {
 	actionItemSurfaceForSlackLookup,
 	createActionItemTools,
+	hasCommitmentContent,
 } from "./action-items"
 import type { TurnActor } from "./actor"
 import type { CompanyBrainAgent } from "./agent"
@@ -91,6 +92,10 @@ export type AssembleTurnToolsArgs = {
 	turnTs?: string
 	/** Current message text length for the action-item extraction guard. */
 	turnTextLength?: number
+	/** Current message text; used only to derive the commitment-content guard. */
+	turnText?: string
+	/** Persisted form of the derived guard for approval resume. */
+	turnHasCommitmentContent?: boolean
 	/** Whether this turn/thread carries a transcript attachment. */
 	hasTranscriptAttachment?: boolean
 	options?: ComputeTurnOptions
@@ -129,6 +134,7 @@ export type TurnToolAssemblySnapshot = {
 	scheduledRun?: boolean
 	turnTs?: string
 	turnTextLength?: number
+	turnHasCommitmentContent?: boolean
 	hasTranscriptAttachment?: boolean
 	enabledFamilies: LazyToolFamily[]
 }
@@ -145,6 +151,8 @@ export function snapshotTurnToolAssembly(
 		| "scheduledRun"
 		| "turnTs"
 		| "turnTextLength"
+		| "turnText"
+		| "turnHasCommitmentContent"
 		| "hasTranscriptAttachment"
 	>,
 	enabledFamilies: LazyToolFamily[],
@@ -188,6 +196,9 @@ export function snapshotTurnToolAssembly(
 		scheduledRun: args.scheduledRun,
 		turnTs: args.turnTs,
 		turnTextLength: args.turnTextLength,
+		turnHasCommitmentContent:
+			args.turnHasCommitmentContent ??
+			hasCommitmentContent(args.turnText ?? ""),
 		hasTranscriptAttachment: args.hasTranscriptAttachment,
 		enabledFamilies: [...enabledFamilies],
 	}
@@ -207,6 +218,7 @@ export function restoreTurnToolAssembly(
 	| "scheduledRun"
 	| "turnTs"
 	| "turnTextLength"
+	| "turnHasCommitmentContent"
 	| "hasTranscriptAttachment"
 	| "initialEnabledFamilies"
 > {
@@ -241,6 +253,7 @@ export function restoreTurnToolAssembly(
 		scheduledRun: snapshot.scheduledRun,
 		turnTs: snapshot.turnTs,
 		turnTextLength: snapshot.turnTextLength,
+		turnHasCommitmentContent: snapshot.turnHasCommitmentContent,
 		hasTranscriptAttachment: snapshot.hasTranscriptAttachment,
 		initialEnabledFamilies: [...snapshot.enabledFamilies],
 	}
@@ -278,10 +291,14 @@ export async function assembleTurnTools(
 		scheduledRun,
 		turnTs,
 		turnTextLength,
+		turnText,
+		turnHasCommitmentContent,
 		hasTranscriptAttachment,
 		traceId,
 		capture,
 	} = args
+	const commitmentContent =
+		turnHasCommitmentContent ?? hasCommitmentContent(turnText ?? "")
 	const passiveInvestigation = Boolean(args.options?.passiveInvestigation)
 	const allowWrites = !passiveInvestigation && !scheduledRun && !actor.readOnly
 	const requestText = args.options?.turnSteering ?? args.turnState?.request.text
@@ -456,6 +473,7 @@ export async function assembleTurnTools(
 			turnTs,
 			askerSlackUserId,
 			turnTextLength,
+			turnHasCommitmentContent: commitmentContent,
 			hasTranscriptAttachment,
 		}),
 	)

@@ -205,6 +205,56 @@ export function findNonDecisionMarker(
 	return NON_DECISION_MARKERS.find((marker) => haystack.includes(marker))
 }
 
+// Heuristic only: this widens the short-message guard, it never decides what
+// to store. A speaker line, a transcript marker, or a commitment cue is enough
+// to let the model attempt extraction; the prompt and non-decision filter still
+// decide the items.
+const SPEAKER_LINE_RE = /^\s*[A-Z][A-Za-z0-9 .'’_-]{0,40}:\s+\S/m
+const TRANSCRIPT_MARKER_RE =
+	/\b(?:transcript|meeting notes|meeting transcript|attendees|agenda)\b/i
+const COMMITMENT_CUE_RE = new RegExp(
+	[
+		"\\bi(?:'|’)ll\\b",
+		"\\bi will\\b",
+		"\\bwe(?:'|’)ll\\b",
+		"\\bwe will\\b",
+		"\\byou(?:'|’)ll\\b",
+		"\\byou will\\b",
+		"\\bwill\\b",
+		"\\bto do\\b",
+		"\\bneed to\\b",
+		"\\bneeds to\\b",
+		"\\bshould\\b",
+		"\\bmust\\b",
+		"\\bdue\\b",
+		"\\bby\\s+(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\\b",
+		"\\bby\\s+\\d{1,2}(?:st|nd|rd|th)?\\b",
+		"\\bby\\s+\\d{4}-\\d{2}-\\d{2}\\b",
+		"\\bby\\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\b",
+		"\\btomorrow\\b",
+		"\\bnext week\\b",
+	].join("|"),
+	"i",
+)
+
+/**
+ * Whether a short current message plausibly contains commitments. This is a
+ * deliberately narrow heuristic, not a semantic classifier; its only job is
+ * to avoid rejecting genuine short notes like "Alice will send the deck."
+ */
+export function hasCommitmentContent(text: string): boolean {
+	const normalized = text
+		.normalize("NFKC")
+		.replace(/[\u2018\u2019]/g, "'")
+		.trim()
+	if (!normalized) return false
+	return (
+		SPEAKER_LINE_RE.test(normalized) ||
+		TRANSCRIPT_MARKER_RE.test(normalized) ||
+		COMMITMENT_CUE_RE.test(normalized)
+	)
+}
+
 export function normalizeActionItemOwnerName(value: string | null | undefined): string {
 	return (value ?? "")
 		.normalize("NFKC")
@@ -263,19 +313,6 @@ export async function buildActionItemDedupeKey(input: {
 	ownerName?: string | null
 }): Promise<string> {
 	return sha256Hex(actionItemDedupePayload(input))
-}
-
-/**
- * Unique row key for a Slack-identified source. Item text is deliberately not
- * part of it: two different transcripts may legitimately produce the same
- * title, and source-level idempotence already prevents re-extraction of the
- * same source.
- */
-export async function buildActionItemRowKey(
-	sourceKey: string,
-	index: number,
-): Promise<string> {
-	return sha256Hex(`${sourceKey}\u0000${index}`)
 }
 
 export const SLACK_MESSAGE_TS_RE = /^\d{9,12}\.\d{6}$/
@@ -470,6 +507,7 @@ export type ActionItemSimilarityMatch = {
 	totalCount: number
 	ratio: number
 	matches: Array<{
+		incomingIndex: number
 		incomingTitle: string
 		existingTitle: string
 		existingId?: string
@@ -480,32 +518,37 @@ export type ActionItemSimilarityMatch = {
 /**
  * Batch-level safety net. A new source is treated as the same extraction when
  * at least 60% of incoming items match an existing item (same owner key) at
- * Jaccard similarity 0.6 or better. The ratio threshold is what prevents a
- * single weak match from merging a small, unrelated batch.
+ * Jaccard similarity 0.6 or better. Matching is greedy one-to-one: once an
+ * existing item is matched it cannot satisfy another incoming item.
  */
 export function matchActionItemBatch(
 	incoming: ReadonlyArray<ActionItemSimilarityItem>,
 	existing: ReadonlyArray<ActionItemSimilarityItem>,
 ): ActionItemSimilarityMatch {
 	const matches: ActionItemSimilarityMatch["matches"] = []
+	const usedExisting = new Set<number>()
 	let matchedCount = 0
-	for (const item of incoming) {
+	for (const [incomingIndex, item] of incoming.entries()) {
 		let best:
 			| {
+					existingIndex: number
 					existing: ActionItemSimilarityItem
 					similarity: number
 			  }
 			| undefined
-		for (const candidate of existing) {
+		for (const [existingIndex, candidate] of existing.entries()) {
+			if (usedExisting.has(existingIndex)) continue
 			if (candidate.ownerKey !== item.ownerKey) continue
 			const similarity = actionItemTitleSimilarity(item.title, candidate.title)
 			if (!best || similarity > best.similarity) {
-				best = { existing: candidate, similarity }
+				best = { existingIndex, existing: candidate, similarity }
 			}
 		}
 		if (best && best.similarity >= ACTION_ITEM_SIMILARITY_THRESHOLD) {
+			usedExisting.add(best.existingIndex)
 			matchedCount += 1
 			matches.push({
+				incomingIndex,
 				incomingTitle: item.title,
 				existingTitle: best.existing.title,
 				existingId: best.existing.id,
@@ -928,17 +971,96 @@ export function lookupActionItemSource(
 	return rows[0]
 }
 
+export type StoredActionItemMatchRow = {
+	id: string
+	title: string
+	owner: string | null
+	ownerName: string | null
+	createdAt: number
+}
+
+export type ActionItemMatchVisibility = {
+	surface?: ActionItemSurface
+	askerSlackUserId?: string | null
+}
+
+function isMatchRowVisible(
+	row: {
+		owner: string | null
+		scope: string
+		created_by: string | null
+	},
+	visibility?: ActionItemMatchVisibility,
+): boolean {
+	if (visibility?.surface?.kind !== "dm") return true
+	return isActionItemVisibleToAsker(
+		{
+			owner: row.owner,
+			scope: row.scope,
+			created_by: row.created_by,
+		},
+		visibility.surface,
+		visibility.askerSlackUserId,
+	)
+}
+
+export function listStoredActionItemRowsForSource(
+	agent: CompanyBrainAgent,
+	scope: string,
+	sourceKey: string,
+	visibility?: ActionItemMatchVisibility,
+): StoredActionItemMatchRow[] {
+	ensureActionItemTable(agent)
+	const rows = agent.sql<{
+		id: string
+		title: string
+		owner: string | null
+		owner_name: string | null
+		scope: string
+		created_by: string | null
+		created_at: number
+	}>`
+		SELECT id, title, owner, owner_name, scope, created_by, created_at
+		FROM brain_action_item
+		WHERE scope = ${scope} AND source_key = ${sourceKey}
+		ORDER BY created_at ASC, id ASC
+	`
+	return rows
+		.filter((row) => isMatchRowVisible(row, visibility))
+		.map((row) => ({
+			id: row.id,
+			title: row.title,
+			owner: row.owner,
+			ownerName: row.owner_name,
+			createdAt: row.created_at,
+		}))
+}
+
 export function listStoredActionItemsForSource(
 	agent: CompanyBrainAgent,
 	scope: string,
 	sourceKey: string,
+	visibility?: ActionItemMatchVisibility,
 ): StoredActionItemSummary[] {
+	return listStoredActionItemRowsForSource(
+		agent,
+		scope,
+		sourceKey,
+		visibility,
+	).map((row) => ({ id: row.id, title: row.title }))
+}
+
+export function countStoredActionItemsForSource(
+	agent: CompanyBrainAgent,
+	scope: string,
+	sourceKey: string,
+): number {
 	ensureActionItemTable(agent)
-	return agent.sql<StoredActionItemSummary>`
-		SELECT id, title FROM brain_action_item
+	const rows = agent.sql<{ n: number }>`
+		SELECT COUNT(*) AS n FROM brain_action_item
 		WHERE scope = ${scope} AND source_key = ${sourceKey}
-		ORDER BY created_at ASC, id ASC
 	`
+	return rows[0]?.n ?? 0
 }
 
 export function recordActionItemSource(
@@ -953,7 +1075,8 @@ export function recordActionItemSource(
 		INSERT INTO brain_action_item_source (
 			scope, source_key, item_count, created_at
 		) VALUES (${scope}, ${sourceKey}, ${itemCount}, ${now})
-		ON CONFLICT(scope, source_key) DO NOTHING
+		ON CONFLICT(scope, source_key) DO UPDATE SET
+			item_count = excluded.item_count
 	`
 }
 
@@ -972,6 +1095,7 @@ export type ActionItemSourceBatch = {
 export function listActionItemGroups(
 	agent: CompanyBrainAgent,
 	scope: string,
+	visibility?: ActionItemMatchVisibility,
 ): ActionItemSourceBatch[] {
 	ensureActionItemTable(agent)
 	const rows = agent.sql<{
@@ -981,15 +1105,20 @@ export function listActionItemGroups(
 		owner_name: string | null
 		source_key: string | null
 		source_ref: string | null
+		scope: string
+		created_by: string | null
 		created_at: number
 	}>`
-		SELECT id, title, owner, owner_name, source_key, source_ref, created_at
+		SELECT
+			id, title, owner, owner_name, source_key, source_ref, scope,
+			created_by, created_at
 		FROM brain_action_item
 		WHERE scope = ${scope}
 		ORDER BY created_at ASC, id ASC
 	`
 	const byLabel = new Map<string, ActionItemSourceBatch>()
 	for (const row of rows) {
+		if (!isMatchRowVisible(row, visibility)) continue
 		// Group recorded sources by source_key; legacy rows fall back to their
 		// provenance source_ref, then to one legacy bucket when both are absent.
 		const sourceKey = row.source_key?.trim()
@@ -1081,15 +1210,41 @@ export type StoreActionItemBatchResult = {
 	sourceError?: string
 }
 
+function matchRowsToSimilarity(
+	rows: ReadonlyArray<StoredActionItemMatchRow>,
+): ActionItemSimilarityItem[] {
+	return rows.map((row) => ({
+		id: row.id,
+		title: row.title,
+		ownerKey: ownerDedupeKeyPart(row.owner, row.ownerName),
+	}))
+}
+
+function matchedItemsToSummaries(
+	matches: ActionItemSimilarityMatch["matches"],
+): StoredActionItemSummary[] {
+	const byId = new Map<string, StoredActionItemSummary>()
+	for (const match of matches) {
+		if (!match.existingId) continue
+		byId.set(match.existingId, {
+			id: match.existingId,
+			title: match.existingTitle,
+		})
+	}
+	return [...byId.values()]
+}
+
 /**
  * Synchronous source-level idempotence block. There is deliberately no await
  * between the source SELECT, the item inserts, and the source INSERT, so two
- * interleaved DO calls cannot both store the same source.
+ * interleaved DO calls cannot both store the same source. A source match only
+ * skips the items that actually matched; genuinely new items are still stored.
  */
 export function storeActionItemBatch(
 	agent: CompanyBrainAgent,
 	args: {
 		scope: string
+		surface?: ActionItemSurface
 		sourceKey: string
 		source: ActionItemSource
 		sourceRef: string | null
@@ -1099,51 +1254,131 @@ export function storeActionItemBatch(
 		now?: number
 	},
 ): StoreActionItemBatchResult {
-	const existing = lookupActionItemSource(agent, args.scope, args.sourceKey)
-	if (existing) {
-		return {
-			status: "already_extracted",
-			stored: [],
-			duplicates: existing.item_count,
-			conflicts: [],
-			failed: [],
-			previouslyStored: listStoredActionItemsForSource(
-				agent,
-				args.scope,
-				args.sourceKey,
-			),
-			sourceTracked: true,
-		}
+	const visibility: ActionItemMatchVisibility = {
+		surface: args.surface,
+		askerSlackUserId: args.askerSlackUserId,
 	}
-
+	const existing = lookupActionItemSource(agent, args.scope, args.sourceKey)
 	const incomingSimilarity: ActionItemSimilarityItem[] = args.items.map(
 		(item) => ({
 			title: item.title,
 			ownerKey: ownerDedupeKeyPart(item.ownerId, item.ownerName),
 		}),
 	)
-	const similarity = matchActionItemSourceBatch(
-		incomingSimilarity,
-		listActionItemGroups(agent, args.scope),
-	)
-	if (similarity) {
-		return {
-			status: "similar_batch",
-			stored: [],
-			duplicates: similarity.batch.itemCount,
-			conflicts: [],
-			failed: [],
-			previouslyStored: similarity.batch.items.map((item) => ({
-				id: item.id,
-				title: item.title,
-			})),
-			matchedSource: {
+	let matchedItems: ActionItemSimilarityMatch["matches"] = []
+	let matchedSource: StoreActionItemBatchResult["matchedSource"]
+	let duplicates = 0
+	let itemsToStore: ReadonlyArray<StoreActionItemBatchItem> = args.items
+
+	if (existing) {
+		const existingRows = listStoredActionItemRowsForSource(
+			agent,
+			args.scope,
+			args.sourceKey,
+			visibility,
+		)
+		const match = matchActionItemBatch(
+			incomingSimilarity,
+			matchRowsToSimilarity(existingRows),
+		)
+		matchedItems = [...match.matches]
+		matchedSource = {
+			sourceKey: args.sourceKey,
+			itemCount: existingRows.length,
+			createdAt: existing.created_at,
+		}
+		duplicates = match.matchedCount
+		const sourceMatchedIndexes = new Set(
+			match.matches.map((item) => item.incomingIndex),
+		)
+
+		// A source can have been created from a similarity split that only
+		// stored the unmatched subset. Compare the remainder with other groups
+		// too, so a retry cannot re-store the items that belonged to the
+		// earlier matched group.
+		const remainingIndexes = args.items
+			.map((_item, index) => index)
+			.filter((index) => !sourceMatchedIndexes.has(index))
+		if (remainingIndexes.length) {
+			const otherGroups = listActionItemGroups(
+				agent,
+				args.scope,
+				visibility,
+			).filter((group) => group.sourceKey !== args.sourceKey)
+			const otherMatch = matchActionItemSourceBatch(
+				remainingIndexes.map((index) => incomingSimilarity[index]!),
+				otherGroups,
+			)
+			if (otherMatch) {
+				const crossMatches = otherMatch.match.matches.flatMap((item) => {
+					const originalIndex = remainingIndexes[item.incomingIndex]
+					return originalIndex === undefined
+						? []
+						: [{ ...item, incomingIndex: originalIndex }]
+				})
+				matchedItems = [...matchedItems, ...crossMatches]
+				duplicates += crossMatches.length
+				if (!match.matchedCount) {
+					matchedSource = {
+						sourceKey: otherMatch.batch.sourceKey,
+						itemCount: otherMatch.batch.itemCount,
+						createdAt: otherMatch.batch.createdAt,
+					}
+				}
+			}
+		}
+
+		const matchedIndexes = new Set(
+			matchedItems.map((item) => item.incomingIndex),
+		)
+		itemsToStore = args.items.filter(
+			(_item, index) => !matchedIndexes.has(index),
+		)
+		if (!itemsToStore.length) {
+			return {
+				status: "already_extracted",
+				stored: [],
+				duplicates,
+				conflicts: [],
+				failed: [],
+				previouslyStored: matchedItemsToSummaries(matchedItems),
+				matchedSource,
+				matchedItems,
+				sourceTracked: true,
+			}
+		}
+	} else {
+		const similarity = matchActionItemSourceBatch(
+			incomingSimilarity,
+			listActionItemGroups(agent, args.scope, visibility),
+		)
+		if (similarity) {
+			matchedItems = similarity.match.matches
+			matchedSource = {
 				sourceKey: similarity.batch.sourceKey,
 				itemCount: similarity.batch.itemCount,
 				createdAt: similarity.batch.createdAt,
-			},
-			matchedItems: similarity.match.matches,
-			sourceTracked: false,
+			}
+			duplicates = similarity.match.matchedCount
+			const matchedIndexes = new Set(
+				similarity.match.matches.map((item) => item.incomingIndex),
+			)
+			itemsToStore = args.items.filter(
+				(_item, index) => !matchedIndexes.has(index),
+			)
+			if (!itemsToStore.length) {
+				return {
+					status: "similar_batch",
+					stored: [],
+					duplicates,
+					conflicts: [],
+					failed: [],
+					previouslyStored: matchedItemsToSummaries(matchedItems),
+					matchedSource,
+					matchedItems,
+					sourceTracked: false,
+				}
+			}
 		}
 	}
 
@@ -1151,7 +1386,7 @@ export function storeActionItemBatch(
 	const stored: StoredActionItemOutput[] = []
 	const conflicts: Array<{ title: string; existingId: string }> = []
 	const failed: Array<{ title: string; reason: string }> = []
-	for (const item of args.items) {
+	for (const item of itemsToStore) {
 		const insert = insertActionItem(agent, {
 			title: item.title,
 			detail: item.detail,
@@ -1175,10 +1410,7 @@ export function storeActionItemBatch(
 				title: item.title,
 				owner: item.ownerId,
 				ownerName: item.ownerName,
-				mention: actionItemMention(
-					item.ownerId,
-					args.askerSlackUserId,
-				),
+				mention: actionItemMention(item.ownerId, args.askerSlackUserId),
 				status: "open",
 			})
 			continue
@@ -1192,9 +1424,14 @@ export function storeActionItemBatch(
 
 	let sourceTracked = false
 	let sourceError: string | undefined
-	if (stored.length && !failed.length && !conflicts.length) {
+	if (existing || stored.length > 0) {
 		try {
-			recordActionItemSource(agent, args.scope, args.sourceKey, stored.length, now)
+			const total = countStoredActionItemsForSource(
+				agent,
+				args.scope,
+				args.sourceKey,
+			)
+			recordActionItemSource(agent, args.scope, args.sourceKey, total, now)
 			sourceTracked = true
 		} catch (error) {
 			sourceError = errorMessage(error)
@@ -1211,49 +1448,17 @@ export function storeActionItemBatch(
 	return {
 		status,
 		stored,
-		duplicates: conflicts.length,
+		duplicates: duplicates + conflicts.length,
 		conflicts,
 		failed,
-		previouslyStored: [],
+		previouslyStored: matchedItemsToSummaries(matchedItems),
+		...(matchedSource ? { matchedSource } : {}),
+		...(matchedItems.length ? { matchedItems } : {}),
 		sourceTracked,
 		...(sourceError ? { sourceError } : {}),
 	}
 }
 
-function alreadyExtractedResult(args: {
-	agent: CompanyBrainAgent
-	scope: string
-	source: ActionItemSource
-	sourceRef: string | null
-	sourceKey: string
-	sourceKind: ActionItemSourceKind
-	sourceRow: ActionItemSourceRow
-	extraWarnings?: ReadonlyArray<string>
-}) {
-	const previouslyStored = listStoredActionItemsForSource(
-		args.agent,
-		args.scope,
-		args.sourceKey,
-	)
-	return {
-		stored: [],
-		duplicates: args.sourceRow.item_count,
-		unresolvedOwners: [],
-		ambiguousOwners: [],
-		rejected: [],
-		warnings: [
-			`This source was already extracted (${args.sourceRow.item_count} item(s) in the ledger). Nothing new was stored.`,
-			...(args.extraWarnings ?? []),
-		],
-		alreadyExtracted: true,
-		previouslyStored,
-		scope: args.scope,
-		source: args.source,
-		sourceRef: args.sourceRef,
-		sourceKey: args.sourceKey,
-		sourceKind: args.sourceKind,
-	}
-}
 
 export type ActionItemToolsArgs = {
 	deps: TurnDeps
@@ -1267,6 +1472,8 @@ export type ActionItemToolsArgs = {
 	askerSlackUserId?: string
 	/** Length of the current turn's message text; used by the extraction guard. */
 	turnTextLength?: number
+	/** Whether that text shows a speaker line, transcript marker, or commitment cue. */
+	turnHasCommitmentContent?: boolean
 	/** Whether the current turn/thread carries a text transcript attachment. */
 	hasTranscriptAttachment?: boolean
 }
@@ -1351,6 +1558,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 		turnTs,
 		askerSlackUserId,
 		turnTextLength,
+		turnHasCommitmentContent,
 		hasTranscriptAttachment,
 	} = args
 	const ownerSchema = deps.z.object({
@@ -1523,6 +1731,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 				input.source === "meeting" &&
 				!sourceRef &&
 				(turnTextLength ?? 0) < EXTRACT_GUARD_SHORT_MESSAGE_CHARS &&
+				!turnHasCommitmentContent &&
 				!hasTranscriptAttachment
 			) {
 				return {
@@ -1576,29 +1785,6 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 			})
 			const sourceWarnings: string[] = []
 			if (sourceIdentity?.warning) sourceWarnings.push(sourceIdentity.warning)
-
-			// Cheap early exit before resolving owners or hashing titles. The
-			// authoritative source check is repeated inside the synchronous
-			// store block below.
-			if (sourceIdentity) {
-				const existing = lookupActionItemSource(
-					agent,
-					scope,
-					sourceIdentity.sourceKey,
-				)
-				if (existing) {
-					return alreadyExtractedResult({
-						agent,
-						scope,
-						source: input.source,
-						sourceRef,
-						sourceKey: sourceIdentity.sourceKey,
-						sourceKind: sourceIdentity.kind,
-						sourceRow: existing,
-						extraWarnings: sourceWarnings,
-					})
-				}
-			}
 
 			if (!prepared.length) {
 				return {
@@ -1710,7 +1896,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 			// Slack-identified sources get a source-scoped row key, not a
 			// title-based one: the source table is the idempotence gate.
 			const resolvedItems: StoreActionItemBatchItem[] = await Promise.all(
-				resolved.map(async (item, index) => ({
+				resolved.map(async (item) => ({
 					...item,
 					dedupeKey:
 						sourceIdentity.kind === "title_fallback"
@@ -1720,7 +1906,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 									ownerId: item.ownerId,
 									ownerName: item.ownerName,
 								})
-							: await buildActionItemRowKey(sourceIdentity.sourceKey, index),
+							: `row:${crypto.randomUUID()}`,
 				})),
 			)
 
@@ -1728,6 +1914,7 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 			// must not yield to another DO event.
 			const storeResult = storeActionItemBatch(agent, {
 				scope,
+				surface,
 				sourceKey: sourceIdentity.sourceKey,
 				source: input.source,
 				sourceRef,
@@ -1768,11 +1955,21 @@ export function createActionItemTools(args: ActionItemToolsArgs): ToolSet {
 					`SIMILAR BATCH: this batch substantially matches previously extracted source ${matchedSource?.sourceKey ?? "unknown"} (${matchedCount}/${resolvedItems.length} items with Jaccard >= ${ACTION_ITEM_SIMILARITY_THRESHOLD}). Nothing new was stored.`,
 				)
 			}
+			if (
+				(storeResult.status === "stored" ||
+					storeResult.status === "partial") &&
+				storeResult.matchedSource &&
+				storeResult.matchedItems?.length
+			) {
+				warnings.push(
+					`MATCHED EXISTING: ${storeResult.matchedItems.length}/${resolvedItems.length} item(s) already exist in source ${storeResult.matchedSource.sourceKey}; ${storeResult.stored.length} new item(s) were stored.`,
+				)
+			}
 			if (storeResult.failed.length) {
 				warnings.push(
 					`FAILED INSERTS (${storeResult.failed.length}): ${storeResult.failed
 						.map((item) => `"${item.title}" (${item.reason})`)
-						.join(", ")}. These items were not stored. The source was not marked as extracted; retry after fixing the failure.`,
+						.join(", ")}. These items were not stored; retry to store the remainder.`,
 				)
 			}
 			if (storeResult.conflicts.length) {
