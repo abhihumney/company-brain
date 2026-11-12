@@ -109,6 +109,8 @@ export type ComputeTurnInput = {
 	progress?: TurnProgress
 	interaction?: InteractionContext
 	slackLookup?: SlackLookupContext
+	/** The triggering Slack message ts, used for action-item source identity. */
+	slackTurnTs?: string
 	/** Slack ids explicitly mentioned in the current message. */
 	mentionedSlackUserIds?: string[]
 	memoryTagSlackUserIds?: string[]

@@ -41,6 +41,11 @@ import { sandboxToolsConfigured } from "../tools/sandbox/client"
 import { createSandboxTools } from "../tools/sandbox/tools"
 import { createSchedulerTools } from "../tools/scheduler"
 import { createSendToTools } from "../tools/send-to"
+import {
+	actionItemSurfaceForSlackLookup,
+	createActionItemTools,
+	hasCommitmentContent,
+} from "./action-items"
 import type { TurnActor } from "./actor"
 import type { CompanyBrainAgent } from "./agent"
 import { createCaptureTools, type TurnCapture } from "./capture-tools"
@@ -56,6 +61,10 @@ import {
 } from "./lazy-tools"
 import { resolveBrainTriageProfile } from "./model-profile"
 import { createProgressTools } from "./progress-tools"
+import {
+	createResolveSlackMembersTool,
+	createSlackMemberDirectoryCache,
+} from "./slack-member-resolve"
 import type { TurnState } from "./state"
 import { createFinishTurnTool, FINISH_TURN_TOOL_NAME } from "./terminal"
 import type {
@@ -79,6 +88,16 @@ export type AssembleTurnToolsArgs = {
 	mentionedSlackUserIds?: string[]
 	askerIsRestricted?: boolean
 	scheduledRun?: boolean
+	/** The current Slack message ts, used as the fallback action-item source. */
+	turnTs?: string
+	/** Current message text length for the action-item extraction guard. */
+	turnTextLength?: number
+	/** Current message text; used only to derive the commitment-content guard. */
+	turnText?: string
+	/** Persisted form of the derived guard for approval resume. */
+	turnHasCommitmentContent?: boolean
+	/** Whether this turn/thread carries a transcript attachment. */
+	hasTranscriptAttachment?: boolean
 	options?: ComputeTurnOptions
 	/** Live progress sink; enables the deliberate post_update narration tool. */
 	progress?: TurnProgress
@@ -113,6 +132,10 @@ export type TurnToolAssemblySnapshot = {
 	mentionedSlackUserIds?: string[]
 	askerIsRestricted?: boolean
 	scheduledRun?: boolean
+	turnTs?: string
+	turnTextLength?: number
+	turnHasCommitmentContent?: boolean
+	hasTranscriptAttachment?: boolean
 	enabledFamilies: LazyToolFamily[]
 }
 
@@ -126,6 +149,11 @@ export function snapshotTurnToolAssembly(
 		| "mentionedSlackUserIds"
 		| "askerIsRestricted"
 		| "scheduledRun"
+		| "turnTs"
+		| "turnTextLength"
+		| "turnText"
+		| "turnHasCommitmentContent"
+		| "hasTranscriptAttachment"
 	>,
 	enabledFamilies: LazyToolFamily[],
 ): TurnToolAssemblySnapshot {
@@ -166,6 +194,12 @@ export function snapshotTurnToolAssembly(
 			: undefined,
 		askerIsRestricted: args.askerIsRestricted,
 		scheduledRun: args.scheduledRun,
+		turnTs: args.turnTs,
+		turnTextLength: args.turnTextLength,
+		turnHasCommitmentContent:
+			args.turnHasCommitmentContent ??
+			hasCommitmentContent(args.turnText ?? ""),
+		hasTranscriptAttachment: args.hasTranscriptAttachment,
 		enabledFamilies: [...enabledFamilies],
 	}
 }
@@ -182,6 +216,10 @@ export function restoreTurnToolAssembly(
 	| "mentionedSlackUserIds"
 	| "askerIsRestricted"
 	| "scheduledRun"
+	| "turnTs"
+	| "turnTextLength"
+	| "turnHasCommitmentContent"
+	| "hasTranscriptAttachment"
 	| "initialEnabledFamilies"
 > {
 	return {
@@ -213,6 +251,10 @@ export function restoreTurnToolAssembly(
 			: undefined,
 		askerIsRestricted: snapshot.askerIsRestricted,
 		scheduledRun: snapshot.scheduledRun,
+		turnTs: snapshot.turnTs,
+		turnTextLength: snapshot.turnTextLength,
+		turnHasCommitmentContent: snapshot.turnHasCommitmentContent,
+		hasTranscriptAttachment: snapshot.hasTranscriptAttachment,
 		initialEnabledFamilies: [...snapshot.enabledFamilies],
 	}
 }
@@ -247,10 +289,18 @@ export async function assembleTurnTools(
 		mentionedSlackUserIds,
 		askerIsRestricted,
 		scheduledRun,
+		turnTs,
+		turnTextLength,
+		turnText,
+		turnHasCommitmentContent,
+		hasTranscriptAttachment,
 		traceId,
 		capture,
 	} = args
+	const commitmentContent =
+		turnHasCommitmentContent ?? hasCommitmentContent(turnText ?? "")
 	const passiveInvestigation = Boolean(args.options?.passiveInvestigation)
+	const allowWrites = !passiveInvestigation && !scheduledRun && !actor.readOnly
 	const requestText = args.options?.turnSteering ?? args.turnState?.request.text
 	const slackResponseSurface: SlackResponseSurface =
 		slackLookup?.memoryScope?.kind === "dm"
@@ -258,6 +308,10 @@ export async function assembleTurnTools(
 			: slackLookup?.memoryScope?.kind === "private_channel"
 				? "private_channel"
 				: "public_channel"
+	const actionItemSurface = actionItemSurfaceForSlackLookup(slackLookup)
+	const slackMemberDirectory = createSlackMemberDirectoryCache(
+		slackLookup?.botToken,
+	)
 	const assembleStartedAt = Date.now()
 	console.log(
 		`[company-brain][${traceId}] assembleTurnTools start actorUser=${actor.userId ?? "-"} personalOnly=${actor.personalConnectionsOnly ? "yes" : "no"} scheduled=${scheduledRun ? "yes" : "no"} slackLookup=${slackLookup ? "yes" : "no"} memoryScope=${slackLookup?.memoryScope?.kind ?? "none"}`,
@@ -398,9 +452,32 @@ export async function assembleTurnTools(
 			askerSlackUserId: args.askerSlackUserId,
 			traceId,
 			// Config writes need a human asking for them, like every other write.
-			allowWrites: !passiveInvestigation && !scheduledRun && !actor.readOnly,
+			allowWrites,
 		}),
 	}
+	Object.assign(
+		tools,
+		createResolveSlackMembersTool({
+			deps,
+			directory: slackMemberDirectory,
+			traceId,
+		}),
+		createActionItemTools({
+			deps,
+			agent,
+			surface: actionItemSurface,
+			directory: slackMemberDirectory,
+			traceId,
+			allowWrites,
+			channelId: slackLookup?.channel,
+			turnTs,
+			askerSlackUserId,
+			turnTextLength,
+			turnHasCommitmentContent: commitmentContent,
+			turnText,
+			hasTranscriptAttachment,
+		}),
+	)
 	Object.assign(
 		tools,
 		createSkillTools(
